@@ -15,8 +15,10 @@ class MainActivity : AppCompatActivity() {
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
 
-        // Example of a call to a native method
-        binding.sampleText.text = stringFromJNI()
+        // Brings up Vulkan 1.3 + VMA on the real device and reports what it found.
+        // The full report also goes to logcat under the tag "ARReconstructor".
+        val selfTest = runVulkanSelfTest()
+        binding.sampleText.text = selfTest.report
     }
 
     /**
@@ -24,6 +26,11 @@ class MainActivity : AppCompatActivity() {
      * which is packaged with this application.
      */
     external fun stringFromJNI(): String
+
+    /**
+     * Runs the native Vulkan 1.3 + VMA self-test. Implemented in vulkan_check.cpp.
+     */
+    external fun runVulkanSelfTest(): NativeSelfTestResult
 
     companion object {
         // Used to load the 'arreconstructor' library on application startup.

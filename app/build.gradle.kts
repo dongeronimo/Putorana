@@ -6,6 +6,8 @@ plugins {
 android {
     namespace = "dev.dongeronimo.arreconstructor"
     compileSdk = 36
+    // r28+ alinha os segmentos LOAD em 16 KB por padrão; o NDK padrão do AGP 8.12 (r27) não.
+    ndkVersion = "28.2.13676358"
 
     defaultConfig {
         applicationId = "dev.dongeronimo.arreconstructor"
@@ -19,6 +21,10 @@ android {
             cmake {
                 cppFlags += "-std=c++17"
             }
+        }
+        ndk {
+            // Único alvo: device arm64 físico. AR não roda no emulador x86.
+            abiFilters += "arm64-v8a"
         }
     }
 

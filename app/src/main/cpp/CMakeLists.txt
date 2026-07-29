@@ -25,9 +25,42 @@ project("arreconstructor")
 # for GameActivity/NativeActivity derived applications, the same library name must be
 # used in the AndroidManifest.xml file.
 add_library(${CMAKE_PROJECT_NAME} SHARED
+        # volk's implementation unit: dlopen's libvulkan.so and defines the
+        # global vk* function pointers that every other TU here resolves against.
+        third_party/volk/volk.c
+        vma_impl.cpp
+        native_self_test.cpp
+        vulkan_check.cpp
         # List C/C++ source files with relative paths to this CMakeLists.txt.
         native-lib.cpp)
 
+# Vulkan Memory Allocator (VMA) is vendored as a single header. It is added as a
+# SYSTEM include so the compiler does not emit warnings from that third-party
+# header (e.g. -Wnullability-completeness), while still flagging issues in our
+# own sources.
+target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR})
+target_include_directories(${CMAKE_PROJECT_NAME} SYSTEM PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/third_party/vma
+        ${CMAKE_CURRENT_SOURCE_DIR}/third_party/glm
+        ${CMAKE_CURRENT_SOURCE_DIR}/third_party/volk)
+
+# Pin VMA to Vulkan 1.3 and resolve Vulkan entry points dynamically through
+# vkGetInstanceProcAddr/vkGetDeviceProcAddr. Dynamic loading is the robust
+# choice on Android, where the NDK's libvulkan.so does not export every core
+# 1.3 symbol for direct (static) linking.
+target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE
+        VMA_VULKAN_VERSION=1003000
+        VMA_STATIC_VULKAN_FUNCTIONS=0
+        VMA_DYNAMIC_VULKAN_FUNCTIONS=1
+        # All Vulkan entry points are loaded dynamically through volk. We must
+        # NOT also link libvulkan directly: volk defines global vk* symbols (as
+        # function pointers), which would collide with libvulkan's exported
+        # functions inside this .so. So VK_NO_PROTOTYPES is global and every TU
+        # that calls Vulkan goes through volk.
+        VK_NO_PROTOTYPES
+        # Android WSI surface (vkCreateAndroidSurfaceKHR).
+        VK_USE_PLATFORM_ANDROID_KHR)
 # Specifies libraries CMake should link to your target library. You
 # can link libraries from various origins, such as libraries defined in this
 # build script, prebuilt third-party libraries, or Android system libraries.
