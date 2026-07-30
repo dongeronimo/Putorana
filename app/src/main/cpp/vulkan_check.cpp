@@ -1,6 +1,5 @@
 #include "vulkan_check.h"
 
-#include "volk.h"
 #include "vk_mem_alloc.h"
 
 #include <cstdint>
@@ -24,40 +23,15 @@ SelfTestResult Fail(const std::string& message) {
 
 } // namespace
 
-SelfTestResult RunVulkanVmaSelfTest() {
-    // 0. Load the global Vulkan entry points (vkCreateInstance, ...) via volk.
-    if (volkInitialize() != VK_SUCCESS) {
-        return Fail("volk: failed to initialize (libvulkan not found?)");
+SelfTestResult RunVulkanVmaSelfTest(VkInstance instance) {
+    if (instance == VK_NULL_HANDLE) {
+        return Fail("Vulkan: no instance to run the self-test on");
     }
 
-    // 1. Create an instance requesting Vulkan 1.3.
-    VkApplicationInfo appInfo{};
-    appInfo.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
-    appInfo.pApplicationName = "ARReconstructor";
-    appInfo.applicationVersion = VK_MAKE_VERSION(1, 0, 0);
-    appInfo.pEngineName = "ARReconstructor";
-    appInfo.engineVersion = VK_MAKE_VERSION(1, 0, 0);
-    appInfo.apiVersion = VK_API_VERSION_1_3;
-
-    VkInstanceCreateInfo instanceInfo{};
-    instanceInfo.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
-    instanceInfo.pApplicationInfo = &appInfo;
-
-    VkInstance instance = VK_NULL_HANDLE;
-    if (vkCreateInstance(&instanceInfo, nullptr, &instance) != VK_SUCCESS) {
-        return Fail("Vulkan: failed to create a 1.3 instance");
-    }
-    // Load instance/device-level entry points now that we have an instance.
-    volkLoadInstance(instance);
-
-    uint32_t loaderVersion = 0;
-    vkEnumerateInstanceVersion(&loaderVersion);
-
-    // 2. Pick the first physical device and verify it supports Vulkan 1.3.
+    // 1. Pick the first physical device and verify it supports Vulkan 1.3.
     uint32_t deviceCount = 0;
     vkEnumeratePhysicalDevices(instance, &deviceCount, nullptr);
     if (deviceCount == 0) {
-        vkDestroyInstance(instance, nullptr);
         return Fail("Vulkan: no physical devices found");
     }
     std::vector<VkPhysicalDevice> devices(deviceCount);
@@ -68,18 +42,18 @@ SelfTestResult RunVulkanVmaSelfTest() {
     vkGetPhysicalDeviceProperties(physicalDevice, &props);
 
     if (props.apiVersion < VK_API_VERSION_1_3) {
-        vkDestroyInstance(instance, nullptr);
         std::ostringstream out;
         out << "Vulkan: device '" << props.deviceName
             << "' only supports " << FormatVersion(props.apiVersion);
         return Fail(out.str());
     }
 
-    // 3. Create a logical device with a single queue from the first family.
+    // 2. Create a throwaway logical device with a single queue from the first
+    // family. No features are enabled and no extensions are requested: this only
+    // needs to be valid enough for VMA to allocate against.
     uint32_t queueFamilyCount = 0;
     vkGetPhysicalDeviceQueueFamilyProperties(physicalDevice, &queueFamilyCount, nullptr);
     if (queueFamilyCount == 0) {
-        vkDestroyInstance(instance, nullptr);
         return Fail("Vulkan: device exposes no queue families");
     }
 
@@ -97,12 +71,20 @@ SelfTestResult RunVulkanVmaSelfTest() {
 
     VkDevice device = VK_NULL_HANDLE;
     if (vkCreateDevice(physicalDevice, &deviceInfo, nullptr, &device) != VK_SUCCESS) {
-        vkDestroyInstance(instance, nullptr);
         return Fail("Vulkan: failed to create logical device");
     }
 
-    // 4. Create a VMA allocator targeting Vulkan 1.3. Entry points are resolved
-    // dynamically through the two getter functions (VMA_DYNAMIC_VULKAN_FUNCTIONS).
+    // The instance was loaded with volkLoadInstanceOnly, so volk's global
+    // device-level pointers (vkDestroyDevice among them) are still null. Load them
+    // into a local table instead of calling volkLoadDevice: that would point the
+    // globals at this throwaway device and leave them dangling once it is
+    // destroyed a few lines below.
+    VolkDeviceTable deviceTable{};
+    volkLoadDeviceTable(&deviceTable, device);
+
+    // 3. Create a VMA allocator targeting Vulkan 1.3. Entry points are resolved
+    // dynamically through the two getter functions (VMA_DYNAMIC_VULKAN_FUNCTIONS),
+    // so VMA does not care about volk's globals either way.
     VmaVulkanFunctions vulkanFunctions{};
     vulkanFunctions.vkGetInstanceProcAddr = vkGetInstanceProcAddr;
     vulkanFunctions.vkGetDeviceProcAddr = vkGetDeviceProcAddr;
@@ -116,12 +98,11 @@ SelfTestResult RunVulkanVmaSelfTest() {
 
     VmaAllocator allocator = VK_NULL_HANDLE;
     if (vmaCreateAllocator(&allocatorInfo, &allocator) != VK_SUCCESS) {
-        vkDestroyDevice(device, nullptr);
-        vkDestroyInstance(instance, nullptr);
+        deviceTable.vkDestroyDevice(device, nullptr);
         return Fail("VMA: failed to create allocator");
     }
 
-    // 5. Allocate (and free) a small buffer through VMA to prove it works.
+    // 4. Allocate (and free) a small buffer through VMA to prove it works.
     VkBufferCreateInfo bufferInfo{};
     bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
     bufferInfo.size = 256;
@@ -143,7 +124,7 @@ SelfTestResult RunVulkanVmaSelfTest() {
         out << "Vulkan 1.3 + VMA OK\n"
             << "GPU: " << props.deviceName << "\n"
             << "Device API: " << FormatVersion(props.apiVersion) << "\n"
-            << "Loader API: " << FormatVersion(loaderVersion) << "\n"
+            << "Loader API: " << FormatVersion(volkGetInstanceVersion()) << "\n"
             << "VMA: " << VK_API_VERSION_MAJOR(VMA_VERSION) << '.'
             << VK_API_VERSION_MINOR(VMA_VERSION) << '.'
             << VK_API_VERSION_PATCH(VMA_VERSION)
@@ -155,10 +136,10 @@ SelfTestResult RunVulkanVmaSelfTest() {
         result.report = "VMA: allocator created but buffer allocation failed";
     }
 
-    // 6. Tear everything down in reverse order.
+    // 5. Tear down what this function created, in reverse order. The instance is
+    // owned by instance_holder and outlives us.
     vmaDestroyAllocator(allocator);
-    vkDestroyDevice(device, nullptr);
-    vkDestroyInstance(instance, nullptr);
+    deviceTable.vkDestroyDevice(device, nullptr);
 
     return result;
 }

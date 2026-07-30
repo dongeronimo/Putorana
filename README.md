@@ -11,4 +11,17 @@ To reconstruct the real world into the virtual world so that I can use this data
   - OpenChisel: cpu-based space reconstructor.
   - Vulkan 1.3: more modern version of vulkan API to do rendering.
 
+---
+# Code Convention
+- Cpp/H files like this: ```VkContext.cpp``` / ```VkContext.h```.
+- Class named like this: ```class FooBar ```.
+- Java-style blocks: ```if (lorenIpsun) {```
+---
+
+# Graphics Architecture
+- Lifecycles:
+  - Instance + debug messager: created once when lib loads
+  - Surface + Physical Device + Device: created during Surface Created
+  - Swapchain: created/recreated during Surface Changed
+
   

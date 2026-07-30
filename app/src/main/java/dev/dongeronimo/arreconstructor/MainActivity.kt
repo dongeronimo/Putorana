@@ -15,10 +15,10 @@ class MainActivity : AppCompatActivity() {
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
 
-        // Brings up Vulkan 1.3 + VMA on the real device and reports what it found.
-        // The full report also goes to logcat under the tag "ARReconstructor".
-        val selfTest = runVulkanSelfTest()
-        binding.sampleText.text = selfTest.report
+        // The instance was already created by JNI_OnLoad, when the companion
+        // object below loaded the library. This only reads back the outcome.
+        // The same report goes to logcat under the tag "ARReconstructor".
+        binding.sampleText.text = vulkanInstanceReport().report
     }
 
     /**
@@ -26,6 +26,13 @@ class MainActivity : AppCompatActivity() {
      * which is packaged with this application.
      */
     external fun stringFromJNI(): String
+
+    /**
+     * Reports the VkInstance built by JNI_OnLoad: API versions, whether the
+     * validation layer was found, and which extensions are enabled. `ok` is false
+     * when the instance could not be created, and `report` says why.
+     */
+    external fun vulkanInstanceReport(): NativeSelfTestResult
 
     /**
      * Runs the native Vulkan 1.3 + VMA self-test. Implemented in vulkan_check.cpp.

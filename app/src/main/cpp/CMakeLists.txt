@@ -25,6 +25,7 @@ project("arreconstructor")
 # for GameActivity/NativeActivity derived applications, the same library name must be
 # used in the AndroidManifest.xml file.
 add_library(${CMAKE_PROJECT_NAME} SHARED
+        putorana/graphics/Instance.cpp
         # volk's implementation unit: dlopen's libvulkan.so and defines the
         # global vk* function pointers that every other TU here resolves against.
         third_party/volk/volk.c
@@ -40,6 +41,8 @@ add_library(${CMAKE_PROJECT_NAME} SHARED
 # own sources.
 target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR})
+target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
+        "./putorana")
 target_include_directories(${CMAKE_PROJECT_NAME} SYSTEM PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/third_party/vma
         ${CMAKE_CURRENT_SOURCE_DIR}/third_party/glm
@@ -60,7 +63,12 @@ target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE
         # that calls Vulkan goes through volk.
         VK_NO_PROTOTYPES
         # Android WSI surface (vkCreateAndroidSurfaceKHR).
-        VK_USE_PLATFORM_ANDROID_KHR)
+        VK_USE_PLATFORM_ANDROID_KHR
+        # Ask for VK_LAYER_KHRONOS_validation in Debug builds only. The layer is
+        # still optional at runtime: it is not part of Android, it has to be
+        # shipped in app/src/debug/jniLibs/arm64-v8a/, and Instance::Create
+        # silently runs without it when the loader cannot find it.
+        $<$<CONFIG:Debug>:APP_ENABLE_VALIDATION>)
 # Specifies libraries CMake should link to your target library. You
 # can link libraries from various origins, such as libraries defined in this
 # build script, prebuilt third-party libraries, or Android system libraries.
