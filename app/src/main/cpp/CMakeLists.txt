@@ -25,7 +25,12 @@ project("arreconstructor")
 # for GameActivity/NativeActivity derived applications, the same library name must be
 # used in the AndroidManifest.xml file.
 add_library(${CMAKE_PROJECT_NAME} SHARED
+        putorana/graphics/Device.cpp
+        putorana/graphics/Frame.cpp
+        putorana/graphics/FrameRing.cpp
         putorana/graphics/Instance.cpp
+        putorana/graphics/PhysicalDevice.cpp
+        putorana/graphics/Swapchain.cpp
         # volk's implementation unit: dlopen's libvulkan.so and defines the
         # global vk* function pointers that every other TU here resolves against.
         third_party/volk/volk.c

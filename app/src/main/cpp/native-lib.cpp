@@ -1,7 +1,11 @@
 #include <jni.h>
+#include <android/native_window_jni.h>
+
 #include <string>
 
 #include "native_self_test.h"
+#include "putorana/graphics/Device.h"
+#include "putorana/graphics/Frame.h"
 #include "putorana/graphics/Instance.h"
 #include "vulkan_check.h"
 
@@ -54,6 +58,50 @@ Java_dev_dongeronimo_arreconstructor_MainActivity_vulkanInstanceReport(
     result.report = result.ok ? instance->Describe()
                              : putorana::graphics::instance_holder::Error();
     return MakeNativeSelfTestResult(env, result);
+}
+
+// --- NativeRenderer -------------------------------------------------------
+// The native entry points of the renderer, forwarded by RenderThread.kt. Unlike
+// everything above, these do NOT run on the UI thread: RenderThread hops them
+// onto the render thread first, and they all run on that same one thread.
+
+extern "C" JNIEXPORT void JNICALL
+Java_dev_dongeronimo_arreconstructor_NativeRenderer_surfaceCreated(
+        JNIEnv* env,
+        jobject /* this */,
+        jobject surface) {
+    // ANativeWindow_fromSurface takes its own reference on the window, so it
+    // stays alive even if Kotlin drops the Surface object right after this
+    // returns. Device takes ownership of that reference and is what releases it,
+    // in OnSurfaceDestroyed.
+    ANativeWindow* window = ANativeWindow_fromSurface(env, surface);
+    putorana::graphics::device_holder::Get().OnSurfaceCreated(window);
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_dev_dongeronimo_arreconstructor_NativeRenderer_surfaceChanged(
+        JNIEnv* /* env */,
+        jobject /* this */,
+        jint /* format */,
+        jint width,
+        jint height) {
+    putorana::graphics::device_holder::Get().OnSurfaceChanged(width, height);
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_dev_dongeronimo_arreconstructor_NativeRenderer_surfaceDestroyed(
+        JNIEnv* /* env */,
+        jobject /* this */) {
+    putorana::graphics::device_holder::Get().OnSurfaceDestroyed();
+    putorana::graphics::ResetFrameStats();
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_dev_dongeronimo_arreconstructor_NativeRenderer_drawFrame(
+        JNIEnv* /* env */,
+        jobject /* this */,
+        jlong frameTimeNanos) {
+    putorana::graphics::DrawFrame(frameTimeNanos);
 }
 
 // Not called by the UI. It is the "is anything working at all?" button: it runs

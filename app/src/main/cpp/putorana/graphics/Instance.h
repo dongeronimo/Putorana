@@ -73,7 +73,9 @@ public:
 
     Instance(const Instance&) = delete;
     Instance& operator=(const Instance&) = delete;
-
+    /**
+     * Call this function to get the vkInstance object
+     * */
     VkInstance handle() const { return instance_; }
 
     /** Version the instance was created with: min(loader, requested). */

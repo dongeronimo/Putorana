@@ -2,7 +2,11 @@ package dev.dongeronimo.arreconstructor
 
 import androidx.appcompat.app.AppCompatActivity
 import android.os.Bundle
-import android.widget.TextView
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
+import androidx.core.view.updatePadding
 import dev.dongeronimo.arreconstructor.databinding.ActivityMainBinding
 
 class MainActivity : AppCompatActivity() {
@@ -15,10 +19,56 @@ class MainActivity : AppCompatActivity() {
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
 
+        goFullscreen()
+
+        // The debug overlay is the only thing that cares about insets. The
+        // surface underneath is meant to be full bleed, cutout included, so it
+        // deliberately gets no inset handling at all.
+        ViewCompat.setOnApplyWindowInsetsListener(binding.sampleText) { view, insets ->
+            val safe = insets.getInsets(
+                WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout()
+            )
+            view.updatePadding(left = safe.left, top = safe.top, right = safe.right)
+            insets
+        }
+
         // The instance was already created by JNI_OnLoad, when the companion
         // object below loaded the library. This only reads back the outcome.
         // The same report goes to logcat under the tag "ARReconstructor".
         binding.sampleText.text = vulkanInstanceReport().report
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        // The bars come back on their own after an app switch, a notification
+        // shade pull or a permission dialog, so re-assert on every focus gain
+        // instead of assuming onCreate settled it.
+        if (hasFocus) {
+            goFullscreen()
+        }
+    }
+
+    /**
+     * Hands the whole display to the renderer.
+     *
+     * Two separate things happen here, and only doing one of them is the usual
+     * mistake. setDecorFitsSystemWindows(false) stops the decor view from
+     * shrinking the content to fit the bars — without it the SurfaceView is
+     * built for a shorter rectangle than the screen, and the swapchain follows.
+     * Hiding the bars is what actually gets them off the pixels.
+     */
+    private fun goFullscreen() {
+        WindowCompat.setDecorFitsSystemWindows(window, false)
+
+        WindowInsetsControllerCompat(window, window.decorView).apply {
+            hide(WindowInsetsCompat.Type.systemBars())
+            // Sticky immersive. An edge swipe brings the bars back as a
+            // transient overlay that hides itself again, without resizing the
+            // window — which matters here, because a resize means a
+            // surfaceChanged and a swapchain rebuild every single time.
+            systemBarsBehavior =
+                WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+        }
     }
 
     /**

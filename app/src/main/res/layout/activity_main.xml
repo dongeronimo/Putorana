@@ -6,14 +6,33 @@
     android:layout_height="match_parent"
     tools:context=".MainActivity">
 
-    <TextView
-        android:id="@+id/sample_text"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:text="Hello World!"
+    <!-- Fills the screen. A SurfaceView punches a transparent hole in the
+         window and its own layer is composited *behind* it, so anything
+         declared after it here (the report below) still draws on top. -->
+    <dev.dongeronimo.arreconstructor.VulkanSurfaceView
+        android:id="@+id/vulkan_surface"
+        android:layout_width="0dp"
+        android:layout_height="0dp"
         app:layout_constraintBottom_toBottomOf="parent"
         app:layout_constraintEnd_toEndOf="parent"
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintTop_toTopOf="parent" />
+
+    <!-- Debug overlay: the VkInstance report from JNI_OnLoad. White with a
+         black shadow so it stays readable over an empty (black) surface and
+         over whatever ends up being rendered later. -->
+    <TextView
+        android:id="@+id/sample_text"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_margin="12dp"
+        android:fontFamily="monospace"
+        android:shadowColor="#FF000000"
+        android:shadowRadius="4"
+        android:textColor="#FFFFFFFF"
+        android:textSize="12sp"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toTopOf="parent"
+        tools:text="VkInstance OK" />
 
 </androidx.constraintlayout.widget.ConstraintLayout>
