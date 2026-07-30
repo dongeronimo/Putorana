@@ -24,4 +24,12 @@ To reconstruct the real world into the virtual world so that I can use this data
   - Surface + Physical Device + Device: created during Surface Created
   - Swapchain: created/recreated during Surface Changed
 
+
+# Instance
+- Encapsulates VkInstance. It tries to be a 1.3 instance and ```std::unique_ptr<Instance> Create``` will fail if that's not possible in the device. 
+- Optional support for validation in ```InstanceConfig```. Validation should only be enabled in debug because the way the app is structured the .so with the library is only available in debug. 
+- Should be the 1st thing to be created, at the moment it's created at ```JNI_OnLoad```.
+- Lives basically forever once created. 
+
+
   
