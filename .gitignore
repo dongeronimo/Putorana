@@ -13,3 +13,8 @@
 .externalNativeBuild
 .cxx
 local.properties
+
+# Compiled shaders. Generated from assets/shaders by tools/compile_shaders.py —
+# derived output, so the sources are what is tracked. A fresh clone has to run
+# the script before its first build.
+/app/src/main/assets/shaders/

@@ -4,6 +4,7 @@
 #include <string>
 
 #include "native_self_test.h"
+#include "putorana/Assets.h"
 #include "putorana/graphics/Device.h"
 #include "putorana/graphics/Frame.h"
 #include "putorana/graphics/Instance.h"
@@ -64,6 +65,17 @@ Java_dev_dongeronimo_arreconstructor_MainActivity_vulkanInstanceReport(
 // The native entry points of the renderer, forwarded by RenderThread.kt. Unlike
 // everything above, these do NOT run on the UI thread: RenderThread hops them
 // onto the render thread first, and they all run on that same one thread.
+
+// Hands over the AssetManager. Separate from JNI_OnLoad because there is no
+// Context there to get one from, and it has to arrive before anything tries to
+// load — see Assets.h on why the reference is kept global.
+extern "C" JNIEXPORT void JNICALL
+Java_dev_dongeronimo_arreconstructor_NativeRenderer_setAssetManager(
+        JNIEnv* env,
+        jobject /* this */,
+        jobject assetManager) {
+    putorana::assets::Attach(env, assetManager);
+}
 
 extern "C" JNIEXPORT void JNICALL
 Java_dev_dongeronimo_arreconstructor_NativeRenderer_surfaceCreated(

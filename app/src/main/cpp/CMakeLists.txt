@@ -47,13 +47,18 @@ FetchContent_MakeAvailable(assimp)
 # for GameActivity/NativeActivity derived applications, the same library name must be
 # used in the AndroidManifest.xml file.
 add_library(${CMAKE_PROJECT_NAME} SHARED
+        putorana/Assets.cpp
         putorana/graphics/Allocator.cpp
         putorana/graphics/Buffer.cpp
         putorana/graphics/Camera.cpp
         putorana/graphics/DescriptorPool.cpp
         putorana/graphics/Device.cpp
+        putorana/graphics/FinalPass.cpp
+        putorana/graphics/FlatColorMaterial.cpp
         putorana/graphics/Frame.cpp
         putorana/graphics/FrameRing.cpp
+        putorana/graphics/GltfLoader.cpp
+        putorana/graphics/HelloWorld.cpp
         putorana/graphics/Image.cpp
         putorana/graphics/Instance.cpp
         putorana/graphics/Light.cpp
@@ -63,6 +68,7 @@ add_library(${CMAKE_PROJECT_NAME} SHARED
         putorana/graphics/Node.cpp
         putorana/graphics/PhysicalDevice.cpp
         putorana/graphics/Renderable.cpp
+        putorana/graphics/ShaderModule.cpp
         putorana/graphics/Swapchain.cpp
         putorana/graphics/World.cpp
         # volk's implementation unit: dlopen's libvulkan.so and defines the
@@ -73,6 +79,23 @@ add_library(${CMAKE_PROJECT_NAME} SHARED
         vulkan_check.cpp
         # List C/C++ source files with relative paths to this CMakeLists.txt.
         native-lib.cpp)
+
+# No "d" on the end of the library name in Debug builds.
+#
+# assimp's CMakeLists does `SET(CMAKE_DEBUG_POSTFIX "d" CACHE STRING ...)`, and
+# FetchContent_MakeAvailable runs it in THIS project's scope, before the
+# add_library above. A target picks up its <CONFIG>_POSTFIX from the matching
+# CMAKE_ variable at creation time, so ours silently became
+# libarreconstructord.so while System.loadLibrary("arreconstructor") kept asking
+# for the name without it — an UnsatisfiedLinkError at the first line of
+# MainActivity, blaming a library that is right there in the APK.
+#
+# Set on the target rather than by clearing the cache variable, so assimp keeps
+# its own convention (libassimpd.so) and this stays a statement about us.
+set_target_properties(${CMAKE_PROJECT_NAME} PROPERTIES
+        DEBUG_POSTFIX ""
+        RELWITHDEBINFO_POSTFIX ""
+        MINSIZEREL_POSTFIX "")
 
 # Vulkan Memory Allocator (VMA) is vendored as a single header. It is added as a
 # SYSTEM include so the compiler does not emit warnings from that third-party

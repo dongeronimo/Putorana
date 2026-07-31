@@ -155,8 +155,17 @@ public:
      * whoever owns the frame.
      *
      * Call before Render, every frame.
+     *
+     * Virtual so a world can do its own per-frame work, and an override MUST
+     * call this base — skipping it leaves every world matrix at the previous
+     * frame's value and nothing appears to move. Do that work BEFORE the base
+     * call: it is what closes the matrices, so anything moved afterwards lands a
+     * frame late.
+     *
+     * This is the seam behaviours will replace. Until they exist it is the only
+     * place a world can animate anything.
      * */
-    void Update(float deltaSeconds);
+    virtual void Update(float deltaSeconds);
 
     /**
      * Builds HOW this world draws: its render passes and the wiring between
@@ -177,11 +186,15 @@ public:
      * */
     virtual void Render(const FrameContext& frame) = 0;
 
+    /**
+     * Valid for the whole life of the world, by construction. Public because a
+     * loader or a pass needs the allocator and the descriptor pool as much as a
+     * subclass does, and there is no invariant here to protect.
+     * */
+    Device& device() const { return device_; }
+
 protected:
     explicit World(Device& device);
-
-    /** Valid for the whole life of the world, by construction. */
-    Device& device() const { return device_; }
 
 private:
     void FlushPendingDestruction();

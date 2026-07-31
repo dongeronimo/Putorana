@@ -4,7 +4,7 @@ AR real space reconstruction rendered with vulkan, for android.
 - Why this name?
 I like to name my vulkan projects with volcanos or flood basalts. Putorana is the main flood basalt plateau of the Siberian Traps (https://en.wikipedia.org/wiki/Putorana_Plateau)
 
-- Mission
+- Mission: 
 To reconstruct the real world into the virtual world so that I can use this data to do useful things. The sample will be a simple ship game where the obstacles will be shoals and islands.
 
 - Technologies
@@ -18,18 +18,43 @@ To reconstruct the real world into the virtual world so that I can use this data
 - Java-style blocks: ```if (lorenIpsun) {```
 ---
 
+# Building
+```./gradlew :app:assembleDebug``` and nothing else. The pieces that are not obvious:
+
+- **Shaders are compiled by the build, not by the app.** ```compileShaders``` runs before ```preBuild``` and turns ```assets/shaders/*.vert|frag``` into SPIR-V in ```app/src/main/assets/shaders```. A GLSL error fails the build with glslc's own ```file:line``` message. To run it by hand: ```python tools/compile_shaders.py``` (```--force```, ```--clean```, ```--release```, ```--verbose```). Assumes python 3.x.
+- The ```.spv``` are gitignored, being derived. A fresh clone gets them on its first build.
+- **glslc comes from the NDK version ```app/build.gradle.kts``` pins, ahead of ```ANDROID_NDK_HOME```.** That variable is machine-wide and drifts — on the machine this was written on it pointed three major versions back. Set ```GLSLC``` to override everything.
+- Two asset folders, and the difference matters. ```assets/``` at the repo root is where things are AUTHORED: .blend files, .glsl. ```app/src/main/assets/``` is what Gradle packages into the APK. Only outputs belong in the second one — pointing Gradle at the first would ship the .blend sources.
+- **The library must not pick up a "d" suffix.** assimp's CMakeLists does ```SET(CMAKE_DEBUG_POSTFIX "d" CACHE STRING ...)```, and ```FetchContent_MakeAvailable``` runs it in this project's scope BEFORE our ```add_library```. A target reads its ```<CONFIG>_POSTFIX``` from the matching ```CMAKE_``` variable at creation time, so ours silently became ```libarreconstructord.so``` while ```System.loadLibrary("arreconstructor")``` kept asking for the name without it — an ```UnsatisfiedLinkError``` on the first line of MainActivity, naming a library that is right there in the APK. ```set_target_properties(... DEBUG_POSTFIX "")``` fixes it on our target only, leaving assimp its own convention.
+- Debug builds ask for ```VK_LAYER_KHRONOS_validation```, which is not part of Android: it has to be present in ```app/src/debug/jniLibs/arm64-v8a/```. Without it the app runs, silently unvalidated.
+- ```arm64-v8a``` only. AR does not run on the emulator, so there is no reason to build x86.
+
+---
+
 # Graphics Architecture
 - Lifecycles:
   - Instance + debug messager: created once when lib loads
   - Surface + Physical Device + Device: created during Surface Created
   - Swapchain: created/recreated during Surface Changed
   - Frame ring (command buffers, acquire semaphores, timeline): created with the Device, untouched by resize
-  - Allocator (VMA): created with the Device, destroyed with it
+  - Allocator (VMA) + descriptor pool: created with the Device, destroyed with it
   - World (scene tree, assets, render passes): owned by the Device, released FIRST in its teardown
-  - Buffers, meshes, anything allocated: nested inside the Allocator's life, so they die every time the app goes to background. Nothing may be loaded once and cached across surfaces.
+  - Buffers, images, meshes, pipelines, descriptor sets: nested inside the Allocator's and the pool's lives, so they die every time the app goes to background. **Nothing may be loaded once and cached across surfaces**, and nothing may be cached in a ```static``` — a static pipeline cache would outlive the device that made it and hand out handles into a dead driver.
+
+- One frame, end to end (```DrawFrame``` in Frame.cpp):
+  1. rebuild the swapchain if a resize or rotation invalidated it; on the first frame that has one, build the World;
+  2. ```World::Update(dt)``` — moves nodes, then closes every world matrix top-down. Touches no Vulkan, so it runs before the acquire and has nothing to wait for;
+  3. ```FrameRing::BeginFrame``` blocks until the slot being reused has retired, then ```vkAcquireNextImageKHR```;
+  4. barrier the acquired image into ```COLOR_ATTACHMENT_OPTIMAL```, hand it to ```World::Render```, barrier it into ```PRESENT_SRC_KHR```. The frame loop knows about no render pass;
+  5. inside the world: ```MeshPass``` collects, sorts, uploads and draws into its own targets; ```FinalPass``` composites those onto the acquired image;
+  6. ```vkQueueSubmit2``` signals the present semaphore and the timeline value together, then present.
 
 # Pieces
-## Instance (cpp, putorana::graphics::Instance)
+
+## Platform and lifetime
+*Everything whose life is dictated by Android: the library load, the surface, and the device hanging off it.*
+
+### Instance (cpp, putorana::graphics::Instance)
 - Encapsulates VkInstance. It tries to be a 1.3 instance and ```std::unique_ptr<Instance> Create``` will fail if that's not possible in the device. 
 - Optional support for validation in ```InstanceConfig```. Validation should only be enabled in debug because the way the app is structured the .so with the library is only available in debug. 
 - Should be the 1st thing to be created, at the moment it's created at ```JNI_OnLoad```.
@@ -46,15 +71,18 @@ To reconstruct the real world into the virtual world so that I can use this data
   auto instance = putorana::graphics::instance_holder::Get();
   VkInstance vkInstance = instance->handle();
   ```
----  
 
-## Device (cpp, putorana::graphics::Device)
-- Owns everything whose life follows the Android surface: the ```ANativeWindow```, the ```VkSurfaceKHR``` built on it, the selected adapter and the ```VkDevice```. It also holds the swapchain and the frame ring.
+---
+
+### Device (cpp, putorana::graphics::Device)
+- Owns everything whose life follows the Android surface: the ```ANativeWindow```, the ```VkSurfaceKHR``` built on it, the selected adapter and the ```VkDevice```. Hanging off that: the swapchain, the frame ring, the VMA allocator, the descriptor pool, and the World.
+- It owns the World for one reason, and it is not tidiness. A world's meshes are allocations from the allocator two lines up, so the world MUST be gone before that allocator is, on a teardown path that runs every time the app is backgrounded. Owned anywhere else that is a rule somebody has to remember; owned here it is what the destructor does. ```Device.h``` only forward-declares ```World```, so the layering stays one way.
 - Created in ```OnSurfaceCreated``` and destroyed in ```OnSurfaceDestroyed```. That cycle runs many times over one library load. Pressing Home destroys it and coming back builds a new one, all inside the same Activity instance, so nothing that depends on the device can be cached on the Activity.
 - All or nothing. If any step fails, the window is released and the object is left empty, so ```HasSurface()``` is the only thing callers need to check.
 - The surface has to exist before the device can be picked. ```VK_KHR_android_surface``` has no ```vkGetPhysicalDevice*PresentationSupportKHR```, so the only way to learn which queue family can present is to ask ```vkGetPhysicalDeviceSurfaceSupportKHR``` about a real surface.
 - Keeps a copy of the ```VkInstance``` the surface was made from, because ```vkDestroySurfaceKHR``` wants that same instance back.
-- Teardown runs inside out: ```vkDeviceWaitIdle```, swapchain, frame ring, ```vkDestroyDevice```, ```vkDestroySurfaceKHR```, and ```ANativeWindow_release``` last of all. The surface was borrowing the window reference this object holds.
+- Teardown runs strictly inside out: ```vkDeviceWaitIdle```, then world, swapchain, frame ring, descriptor pool, allocator, ```vkDestroyDevice```, ```vkDestroySurfaceKHR```, and ```ANativeWindow_release``` last of all. The world goes first because everything it holds came from the three things after it; the window goes last because the surface was borrowing the reference this object holds.
+- ```vmaDestroyAllocator``` asserts in debug when an allocation is still alive. That assert is the leak check for this whole ordering: it fires exactly when something outlived the device it was allocated from.
 - ```volkLoadDevice``` points volk's global ```vk*``` table at this device. Those pointers dangle between ```vkDestroyDevice``` and the next load, which is harmless only because nothing renders while there is no surface. This is also why vulkan_check.cpp uses a local ```VolkDeviceTable``` for its throwaway device.
 - Usage:
   ```
@@ -64,7 +92,7 @@ To reconstruct the real world into the virtual world so that I can use this data
 
 ---
 
-## PhysicalDevice (cpp, putorana::graphics::PhysicalDevice)
+### PhysicalDevice (cpp, putorana::graphics::PhysicalDevice)
 - Not a resource. A ```VkPhysicalDevice``` is a handle the instance already owns, so this is a value type behind ```std::optional``` rather than a ```unique_ptr``` like Instance.
 - ```Select``` walks every adapter and rejects on API version, missing device extensions, missing features, or the absence of a queue family that can both draw and present. When nothing survives it names each candidate with its reason, because "no suitable GPU" is useless in a bug report.
 - The required feature list lives in a table keyed by pointer to member. The check that asks whether a feature is supported and the code that switches it on both read from that table. Keeping them as two separate lists is how a renderer ends up enabling something it never verified.
@@ -74,7 +102,7 @@ To reconstruct the real world into the virtual world so that I can use this data
 
 ---
 
-## Swapchain (cpp, putorana::graphics::Swapchain)
+### Swapchain (cpp, putorana::graphics::Swapchain)
 - Owns the presentable images, plus one view and one ```renderFinished``` semaphore for each of them.
 - Its life is nested inside the surface's, but shorter. A resize or a rotation replaces it while the surface stays where it is.
 - ```imageExtent``` is copied from ```currentExtent``` and ```preTransform``` from ```currentTransform```. The spec decides both: behaviour is platform dependent when the extent disagrees, and a transform that does not match makes the presentation engine rotate every frame it shows.
@@ -85,7 +113,7 @@ To reconstruct the real world into the virtual world so that I can use this data
 
 ---
 
-## FrameRing (cpp, putorana::graphics::FrameRing)
+### FrameRing (cpp, putorana::graphics::FrameRing)
 - The per frame resources that do not depend on the swapchain: command pool, command buffers, the ```imageAvailable``` semaphores and the timeline semaphore. Device lifetime, so a resize leaves all of it alone.
 - The timeline replaces what would otherwise be one ```VkFence``` per slot. Frame N signals value N+1, so ```BeginFrame``` waits for N+1 minus the number of frames in flight before handing the slot over. That single wait is the whole CPU throttle.
 - ```EndFrame``` may only be called once a submission has actually gone through. Advance without one and the next ```BeginFrame``` waits forever on a value nobody will signal.
@@ -93,7 +121,7 @@ To reconstruct the real world into the virtual world so that I can use this data
 
 ---
 
-## Allocator (cpp, putorana::graphics::Allocator)
+### Allocator (cpp, putorana::graphics::Allocator)
 - The one ```VmaAllocator```. Every ```VkBuffer``` and ```VkImage``` is carved out of it, and it is owned by Device — so it dies and is rebuilt on every trip through Home, and so does everything allocated from it.
 - Exists because ```maxMemoryAllocationCount``` is a real limit, routinely 4096 on Android. One ```vkAllocateMemory``` per mesh burns through it. VMA takes big blocks and suballocates.
 - Must be created after ```volkLoadDevice```. VMA is built with ```VMA_DYNAMIC_VULKAN_FUNCTIONS```, so the only two entry points it is handed are ```vkGetInstanceProcAddr``` and ```vkGetDeviceProcAddr``` and it fetches the rest through them. Forgetting to fill those two in is the classic volk+VMA crash: a table of nulls, called on the first allocation.
@@ -102,7 +130,16 @@ To reconstruct the real world into the virtual world so that I can use this data
 
 ---
 
-## Buffer (cpp, putorana::graphics::Buffer)
+### DescriptorPool (cpp, putorana::graphics::DescriptorPool)
+- Where every ```VkDescriptorSet``` comes from. A pool's budget is fixed at creation: guess low and allocation starts failing halfway through loading a scene, guess high and the memory is reserved regardless. Neither is worth getting right, so this grows — when a block refuses with ```OUT_OF_POOL_MEMORY``` or ```FRAGMENTED_POOL```, another block is created and the allocation retried. Any other result is a real out-of-memory and is reported instead.
+- Sets are never freed individually, and the pools are deliberately NOT created with ```FREE_DESCRIPTOR_SET_BIT```: not asking for it lets the driver use a plain bump allocator inside each block. Everything dies with the Device anyway, so there is nothing to reclaim in between.
+
+---
+
+## GPU resources
+*The things memory is spent on. All of them die with the Allocator, which dies with the Device.*
+
+### Buffer (cpp, putorana::graphics::Buffer)
 - A ```VkBuffer``` plus its VMA allocation, permanently mapped, written straight from the CPU.
 - No staging buffer anywhere, and that is the platform rather than a shortcut. Staging exists because a discrete GPU has memory the CPU cannot reach. Here there is one pool of RAM and ```DEVICE_LOCAL|HOST_VISIBLE``` memory types exist, so a staging copy would be memcpy'ing RAM to RAM. No buffer here carries ```TRANSFER_DST```.
 - What that memory usually *is*, though, is write-combined and uncached: writes are fast, reads are tens of times slower because every one goes to DRAM. So the mapped pointer is write-only, written forward, never used as scratch and never read back — not even for a read-modify-write. ```VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT``` states that contract to VMA and is what gets the fast memory type back.
@@ -111,7 +148,15 @@ To reconstruct the real world into the virtual world so that I can use this data
 
 ---
 
-## Mesh (cpp, putorana::graphics::Mesh)
+### Image (cpp, putorana::graphics::Image)
+- A VMA image plus its one view — the counterpart of Buffer for attachments and textures.
+- Never host-mapped, unlike Buffer. OPTIMAL tiling puts the memory layout in the driver's hands, so uploading pixels means a staging buffer and ```vkCmdCopyBufferToImage```. This is the one place "Android has unified memory so no staging is needed" does NOT apply: the obstacle is tiling, not locality.
+- Attachments get ```VMA_ALLOCATION_CREATE_DEDICATED_MEMORY_BIT```. Full screen targets are large, tilers often want them on their own, and it stops one from pinning a whole suballocation block alive.
+- The depth format is queried, never assumed. The spec guarantees only that at least ONE of ```D32_SFLOAT``` and ```X8_D24_UNORM_PACK32``` supports depth attachment, and never says which.
+
+---
+
+### Mesh (cpp, putorana::graphics::Mesh)
 - Indexed geometry on the GPU: one vertex buffer, one index buffer, the counts to draw them with, and a local AABB. Knows nothing about materials, pipelines or the scene — a Mesh is something you bind, not something that draws itself.
 - Two independent axes, and keeping them independent is the design. ```VertexFormat``` (Static/Skinned) changes the stride and the vertex input state and nothing else; ```MeshStorage``` (Immutable/Mutable) changes the memory layout and nothing else. Every combination works and neither axis knows the other exists.
 - One interleaved vertex buffer. Position is the first member of every format, so bounds, culling and any future position-only pass use one stride and offset 0 regardless of what the mesh is.
@@ -128,24 +173,10 @@ To reconstruct the real world into the virtual world so that I can use this data
 
 ---
 
-## World (cpp, putorana::graphics::World)
-- A scene plus the way that scene is drawn. It owns four things and that ownership IS the class: the tree rooted at ROOT, the assets in it (meshes, materials), its own sequence of render passes, and the frame's update.
-- The pass chain belongs to the world and not to the frame loop because each world draws differently — one is mesh+final, another cubemap+shadow+gbuffer, a volume renderer is something else again. ```Frame.cpp``` does acquire, layout transitions, submit and present, and knows about no pass at all.
-- **Owned by the Device, and released first in its teardown.** A world's meshes are allocations from an allocator that is about to stop existing, so the ordering has to be right on a path that runs every time the app is backgrounded. Owned anywhere else, that would be a rule somebody has to remember; owned here it is simply what the destructor does. ```Device.h``` forward-declares it so the layering stays one way.
-- The practical consequence is that there is no "load the assets once at startup". Whatever loads them lives in ```CreateWorld```, and ```CreateWorld``` runs again on every return from background.
-- Two virtuals, not one. ```CreateRenderPasses``` is HOW this world draws and needs a swapchain to exist; ```CreateWorld``` is WHAT it draws. They fail for different reasons — a broken pipeline is a shader problem, a missing model is an asset problem — and a single Initialize would report both as "world failed".
-- Assets are owned by the BASE, unlike the TypeScript version where each concrete world keeps its own mesh list and destroys it in an override. Every new world there can forget; here there is nothing to forget.
-- The material registry is a member, not the global map the TypeScript version uses. That global has to be emptied on every world change or the next world inherits orphans, and forgetting leaks the old one's buffers. Scoped to the world, the problem does not exist. ```AddMaterial``` refuses a duplicate name rather than replacing, because a silent replace destroys a material that live renderables still point at.
-- Member declaration order carries real weight: ```root_``` is declared LAST so it is destroyed FIRST, and the scene is gone before the meshes and materials its renderables pointed at.
-- ```Update``` owns the traversal rather than delegating to ```Node```, because of what will share it: each node's behaviours run BEFORE that node's matrix closes, so a behaviour moving its own node or a descendant takes effect this frame, while touching an ancestor whose matrix already closed shows up next frame. That ordering is a design decision and belongs to whoever owns the frame. It is why ```Node``` exposes the single-node step and not only the recursive one.
-- ```DestroyNode``` defers to the end of ```Update```, because the traversal is walking the very lists it would erase from. The flush drops any node already covered by a queued ancestor — destroying the ancestor frees the subtree, so the descendant's entry would be a pointer to freed memory by the time its turn came. JavaScript gets away with queueing both; this does not.
-- ```FrameContext``` carries the swapchain rather than four loose fields (format, extent, preTransform, image) so they cannot be mismatched. A world that keeps render targets of its own notices the extent changed and rebuilds them itself — there is no resize callback.
-- The frame loop's ```UNDEFINED``` old-layout barrier is only correct because whatever draws covers every pixel: the placeholder is a full screen clear, a world's final pass is a full screen quad. Compositing onto the previous frame would need that to become ```PRESENT_SRC_KHR``` and would drag the swapchain's image count into the world's reasoning.
-- The delta handed to ```Update``` is clamped to 100ms. Returning from background produces a gap of seconds, and everything that consumes a delta integrates it — unclamped, the first frame back teleports the scene.
+## The scene
+*Pure data and hierarchy. Nothing in this group records a Vulkan command.*
 
----
-
-## Node (cpp, putorana::graphics::Node)
+### Node (cpp, putorana::graphics::Node)
 - A transform in a hierarchy plus whatever optional components hang off it. A node by itself is a position, a scale and an attitude; what it IS comes from what is attached. Renderable present means it is drawn, camera present means it is a camera, light present means it is a light. A node carrying none is a pure pivot, which is not a degenerate case but the most common one — every parent is one.
 - **Rotation is a quaternion inside and unbounded Euler degrees outside.** The quaternion is the source of truth: it feeds the matrices and any future interpolation. The Euler angles are an editable VIEW of it, with Unity's semantics.
 - Setting ```eulerAngles``` stores the numbers verbatim, unclamped. Set (500, -720.5, 1234) and read back (500, -720.5, 1234) — that is what lets an animation drive an angle continuously through 360 without the value jumping. Setting the quaternion directly makes those raw numbers meaningless, since a quaternion cannot say whether it got there by turning 30 degrees or 390, so the cache is flagged stale and the next read derives canonical angles instead (x in [-90,90], y and z in [-180,180]).
@@ -166,7 +197,7 @@ To reconstruct the real world into the virtual world so that I can use this data
 
 ---
 
-## Renderable (cpp, putorana::graphics::Renderable)
+### Renderable (cpp, putorana::graphics::Renderable)
 - What a scene node draws: one Mesh, one Material, and the per-object decisions that belong to the object rather than the asset. Two pointers and two fields, and no Vulkan anywhere in it.
 - Owns neither the Mesh nor the Material. Those are assets shared by reference — two hundred wall tiles point at one Mesh and one Material between them — and whatever loaded them destroys them, which means dying with the Device.
 - Copyable, and the copy IS the prefab clone: pointers shared, per-object state copied. The TypeScript renderer needs a hand-written ```cloneRenderable``` for this and has a bug waiting in it every time a field is added and the clone is not updated. A ```static_assert``` pins the property so a ```unique_ptr``` member cannot creep in and silently break it.
@@ -178,7 +209,7 @@ To reconstruct the real world into the virtual world so that I can use this data
 
 ---
 
-## Camera (cpp, putorana::graphics::Camera)
+### Camera (cpp, putorana::graphics::Camera)
 - The projection half of a camera, hanging off a Node like a Renderable does. The VIEW is not here: it is the inverse of the owning node's world matrix, because the camera looks down its node's -Z. That is what lets a camera be parented to a ship and follow it with no code.
 - Not a 29-line class like the WebGPU original it is ported from, because three transforms sit between a right-handed world and an Android screen and none of them are optional.
 - ```perspectiveRH_ZO``` and not ```glm::perspective```. RH is the glTF convention the whole engine uses; ZO is Vulkan's [0,1] clip depth, which is NOT GLM's default — GLM ships OpenGL's [-1,1] and only switches globally with ```GLM_FORCE_DEPTH_ZERO_TO_ONE```. A global that halves everyone's depth precision if someone drops it is worse than naming the variant at the one call site.
@@ -189,7 +220,7 @@ To reconstruct the real world into the virtual world so that I can use this data
 
 ---
 
-## Light (cpp, putorana::graphics::Light)
+### Light (cpp, putorana::graphics::Light)
 - A light source as scene data, hanging off a Node. No Vulkan in it at all — not even an include. Whatever gathers lights each frame reads the fields and packs them.
 - Position and direction are deliberately absent. Both come from the owning node's world matrix: position is its translation, direction is its -Z, the same convention as Camera and glTF. Storing a direction here would duplicate the node's rotation in a second place, and two copies of a rotation drift — and a spotlight could no longer just be parented to a torch.
 - ```LightType``` is a plain field, not a virtual call. The consumer buckets lights by type and writes three differently shaped GPU arrays, so it is one switch at collection time then a ```static_cast```. Paying for virtual dispatch to ask "what are you" would be backwards for a data-oriented job.
@@ -202,7 +233,38 @@ To reconstruct the real world into the virtual world so that I can use this data
 
 ---
 
-## Material (cpp, putorana::graphics::Material)
+### World (cpp, putorana::graphics::World)
+- A scene plus the way that scene is drawn. It owns four things and that ownership IS the class: the tree rooted at ROOT, the assets in it (meshes, materials), its own sequence of render passes, and the frame's update.
+- The pass chain belongs to the world and not to the frame loop because each world draws differently — one is mesh+final, another cubemap+shadow+gbuffer, a volume renderer is something else again. ```Frame.cpp``` does acquire, layout transitions, submit and present, and knows about no pass at all.
+- **Owned by the Device, and released first in its teardown.** A world's meshes are allocations from an allocator that is about to stop existing, so the ordering has to be right on a path that runs every time the app is backgrounded. Owned anywhere else, that would be a rule somebody has to remember; owned here it is simply what the destructor does. ```Device.h``` forward-declares it so the layering stays one way.
+- The practical consequence is that there is no "load the assets once at startup". Whatever loads them lives in ```CreateWorld```, and ```CreateWorld``` runs again on every return from background.
+- Two virtuals, not one. ```CreateRenderPasses``` is HOW this world draws and needs a swapchain to exist; ```CreateWorld``` is WHAT it draws. They fail for different reasons — a broken pipeline is a shader problem, a missing model is an asset problem — and a single Initialize would report both as "world failed".
+- Assets are owned by the BASE, unlike the TypeScript version where each concrete world keeps its own mesh list and destroys it in an override. Every new world there can forget; here there is nothing to forget.
+- The material registry is a member, not the global map the TypeScript version uses. That global has to be emptied on every world change or the next world inherits orphans, and forgetting leaks the old one's buffers. Scoped to the world, the problem does not exist. ```AddMaterial``` refuses a duplicate name rather than replacing, because a silent replace destroys a material that live renderables still point at.
+- Member declaration order carries real weight: ```root_``` is declared LAST so it is destroyed FIRST, and the scene is gone before the meshes and materials its renderables pointed at.
+- ```Update``` owns the traversal rather than delegating to ```Node```, because of what will share it: each node's behaviours run BEFORE that node's matrix closes, so a behaviour moving its own node or a descendant takes effect this frame, while touching an ancestor whose matrix already closed shows up next frame. That ordering is a design decision and belongs to whoever owns the frame. It is why ```Node``` exposes the single-node step and not only the recursive one.
+- ```DestroyNode``` defers to the end of ```Update```, because the traversal is walking the very lists it would erase from. The flush drops any node already covered by a queued ancestor — destroying the ancestor frees the subtree, so the descendant's entry would be a pointer to freed memory by the time its turn came. JavaScript gets away with queueing both; this does not.
+- ```FrameContext``` carries the swapchain rather than four loose fields (format, extent, preTransform, image) so they cannot be mismatched. A world that keeps render targets of its own notices the extent changed and rebuilds them itself — there is no resize callback.
+- The frame loop's ```UNDEFINED``` old-layout barrier is only correct because whatever draws covers every pixel: the placeholder is a full screen clear, a world's final pass is a full screen quad. Compositing onto the previous frame would need that to become ```PRESENT_SRC_KHR``` and would drag the swapchain's image count into the world's reasoning.
+- The delta handed to ```Update``` is clamped to 100ms. Returning from background produces a gap of seconds, and everything that consumes a delta integrates it — unclamped, the first frame back teleports the scene.
+
+---
+
+### HelloWorld (cpp, putorana::graphics::HelloWorld)
+- The first world: the cube from ```unitary_cube.glb``` under ROOT, spinning, and a second node carrying the camera at (2,3,5) aimed at the origin.
+- It exists to exercise the whole chain at once — asset read, glTF parse, mesh upload, node graph, material, pipeline cache, instanced draw, composite — with the smallest content that can show any of it is wrong. A cube is unforgiving on purpose: wrong winding hides the faces you should see and shows the ones you should not, wrong depth order draws the far faces over the near ones, and wrong normals flatten it into a hexagon.
+- The camera is a SIBLING of the cube, not a child, so spinning the cube does not spin the camera with it.
+- ```LookAt``` in ```CreateWorld``` works because it uses ```ComputeWorldMatrix```, which walks the parent chain rather than trusting the cache — and the cache is empty there, since no frame has run.
+- The spin accumulates degrees and never wraps, which is exactly what the unbounded Euler interface is for: the angle climbs past 360 and the quaternion it drives stays well behaved.
+- ```Update``` calls the base LAST. The base is what closes every world matrix, so anything moved after it would land a frame late. This is the seam behaviours will replace.
+- ```Frame.cpp``` is the only place that names a concrete world; everything else in the namespace knows the World interface. It builds the world on the first frame with a swapchain — not in ```OnSurfaceCreated``` — because pipelines are built for the surface's colour format, and it latches a flag so a world that fails to build is not retried sixty times a second.
+
+---
+
+## Drawing
+*What turns the scene into commands.*
+
+### Material (cpp, putorana::graphics::Material)
 - A shader plus its render state meeting a set of parameters, in two halves with two lifetimes. The TYPE (the subclass) decides the PIPELINE: shader, blend, cull, depth. The INSTANCE decides SET 2: its uniform buffer, its textures, its descriptor set. Two instances of one subclass differ there and nowhere else.
 - ```CreatePipeline``` is ```const``` so the compiler enforces that rule: the result is shared between instances, so anything that changes render state has to be a different subclass.
 - **The material builds the pipeline; the render pass owns it.** The WebGPU original caches pipelines in a ```static``` member of each material class, with a comment admitting the cache assumes one device for the life of the app. On Android that is false — the ```VkDevice``` dies every time the app is backgrounded — so a static cache would hand out pipelines belonging to a device that no longer exists, and the crash would land somewhere else entirely. The pass has the right lifetime, owns the attachment formats the pipeline needs, and makes a future shadow pass a second cache rather than a redesign.
@@ -212,7 +274,16 @@ To reconstruct the real world into the virtual world so that I can use this data
 
 ---
 
-## MeshPass (cpp, putorana::graphics::MeshPass)
+### FlatColorMaterial (cpp, putorana::graphics::FlatColorMaterial)
+- The first concrete material and the worked example of the Material contract: what to chain into ```pNext```, what to declare dynamic, where the set layouts come from. The next material is this file with a different shader and a different parameter block.
+- Not quite the unlit material the WebGPU renderer starts with. ```mesh_flat.frag``` adds one hardcoded light direction, four lines, because a rotating cube in flat colour is a hexagon and the job of the first thing that draws is to show that winding, normals and depth order are arriving correctly.
+- ```frontFace = COUNTER_CLOCKWISE``` has to agree with the Y flip in ```Camera::ProjectionMatrix```: flipping Y reverses winding, so those are one decision made in two files.
+- Its parameter buffer is single-buffered, unlike the pass's per-frame data. A parameter written once at load and left alone does not need a copy per frame in flight, and paying for it would mean a descriptor set per frame for every material in the scene.
+- The shader modules are locals in ```CreatePipeline```: whichever of its half-dozen early returns fires, they are destroyed, and the pipeline has already kept what it needs from them.
+
+---
+
+### MeshPass (cpp, putorana::graphics::MeshPass)
 - The opaque geometry pass. Not a ```VkRenderPass``` — dynamic rendering means no such object exists in this project; "render pass" is the logical unit: targets, descriptor layouts, and an algorithm for turning a tree of nodes into as few draw calls as possible.
 - Four steps per frame. COLLECT walks the tree keeping renderables whose ```passMask``` has this pass's bit. SORT orders by pipeline, then material, then mesh. UPLOAD writes every object's matrices into set 1 in sorted order. DRAW walks the sorted list in runs sharing all three keys and emits one instanced draw per run.
 - **The instancing identity**: slots in the object buffer are filled in the same order the draws are issued, and a draw's ```firstInstance``` is the index of its first slot. Vulkan defines ```gl_InstanceIndex``` as firstInstance plus the instance counter, so it lands exactly on the right slot. That is the whole scheme.
@@ -230,21 +301,17 @@ To reconstruct the real world into the virtual world so that I can use this data
 
 ---
 
-## DescriptorPool (cpp, putorana::graphics::DescriptorPool)
-- Where every ```VkDescriptorSet``` comes from. A pool's budget is fixed at creation: guess low and allocation starts failing halfway through loading a scene, guess high and the memory is reserved regardless. Neither is worth getting right, so this grows — when a block refuses with ```OUT_OF_POOL_MEMORY``` or ```FRAGMENTED_POOL```, another block is created and the allocation retried. Any other result is a real out-of-memory and is reported instead.
-- Sets are never freed individually, and the pools are deliberately NOT created with ```FREE_DESCRIPTOR_SET_BIT```: not asking for it lets the driver use a plain bump allocator inside each block. Everything dies with the Device anyway, so there is nothing to reclaim in between.
+### FinalPass (cpp, putorana::graphics::FinalPass)
+- Puts what the mesh pass drew onto the presented image, with one screen-covering triangle that samples it.
+- The mesh pass could draw straight into the swapchain image and save a full screen write plus a full screen read, which on a phone is real bandwidth — this pass is not free. It is here because everything that has to happen to a FINISHED image happens in it: tone mapping the day the mesh pass draws into a float target, and post effects after that. A geometry pass cannot do those to itself, because they need the whole image while it is still being written.
+- Its own set 0 — one combined image sampler, no camera, no objects, no material. A pass defines its own numbering; the three-set contract in Material.h is about shaders that draw geometry.
+- ```loadOp``` is ```DONT_CARE```, not ```CLEAR```: the triangle covers every pixel, so clearing would write a full screen of colour that is immediately overwritten.
+- The sampler is ```NEAREST``` because this is a 1:1 copy — source and target are both the swapchain extent, so every sample lands exactly on a texel and linear filtering would be four taps computing the same value.
+- The descriptor is only rewritten when the source view changes, which is a resize, and it waits for the GPU first: rewriting a set a frame in flight is reading is undefined.
 
 ---
 
-## Image (cpp, putorana::graphics::Image)
-- A VMA image plus its one view — the counterpart of Buffer for attachments and textures.
-- Never host-mapped, unlike Buffer. OPTIMAL tiling puts the memory layout in the driver's hands, so uploading pixels means a staging buffer and ```vkCmdCopyBufferToImage```. This is the one place "Android has unified memory so no staging is needed" does NOT apply: the obstacle is tiling, not locality.
-- Attachments get ```VMA_ALLOCATION_CREATE_DEDICATED_MEMORY_BIT```. Full screen targets are large, tilers often want them on their own, and it stops one from pinning a whole suballocation block alive.
-- The depth format is queried, never assumed. The spec guarantees only that at least ONE of ```D32_SFLOAT``` and ```X8_D24_UNORM_PACK32``` supports depth attachment, and never says which.
-
----
-
-## Frame (cpp, putorana::graphics::DrawFrame)
+### Frame (cpp, putorana::graphics::DrawFrame)
 - Free functions, no class. Drawing a frame is the renderer's job, and the renderer is this namespace rather than an object. Wrapping it in a ```class Renderer``` would only be a namespace with worse ergonomics.
 - Runs once per vsync on the render thread. ```frameTimeNanos``` is when the frame is meant to be displayed, not when the call began, so animation driven from it stays smooth when a frame lands late.
 - Swapchain recreation has two triggers and both matter. ```surfaceChanged``` is the obvious one. The other is ```VK_ERROR_OUT_OF_DATE_KHR``` or ```VK_SUBOPTIMAL_KHR``` coming back from acquire or present, and on Android that is the trigger that fires on rotation, because the compositor can change the surface transform without the window size moving at all.
@@ -255,14 +322,67 @@ To reconstruct the real world into the virtual world so that I can use this data
 
 ---
 
-## NativeRenderer (java, dev.dongeronimo.arreconstructor::NativeRenderer)
-- Mirrors the c++ public interface.
-- Loads the library (triggering JN_OnLoad).
+## Content pipeline
+*Getting art and shaders from a folder on disk into the running app.*
+
+### Assets (cpp, putorana::assets)
+- Reading files out of the APK. An app's assets are not files on a filesystem: they live inside the APK, usually compressed, and the only way at them is ```AAssetManager```. There is no path ```fopen``` would take, which is why every loader here consumes bytes rather than a filename.
+- The Java ```AssetManager``` arrives through a JNI call of its own rather than through ```JNI_OnLoad```, which has no Context to get one from. ```VulkanSurfaceView```'s init makes the call, before the surface callback is registered, so it cannot lose a race with a surface that already exists.
+- Native keeps a GLOBAL JNI reference to the Java object, and this is not optional: ```AAssetManager_fromJava``` returns a pointer whose validity is tied to that object staying alive, and a local reference dies when the JNI call returns. Skipping it is the classic form of this bug — it works until the collector runs.
+- The application context's AssetManager, not the view's: native holds it for the life of the process, and an Activity-scoped one would be pinned across configuration changes.
+- Authoring files live in ```assets/``` at the repo root (.blend and the .glb next to it); only the .glb is copied into ```app/src/main/assets/```, which is what Gradle packages. Pointing Gradle at the root folder instead would put the .blend sources in the APK.
 
 ---
 
-## RenderThread (java, dev.dongeronimo.arreconstructor::RenderThread)
+### GltfLoader (cpp, putorana::graphics::LoadGltf)
+- Reads a .glb from the assets and turns its scene into our node graph. An assimp node becomes a Node with its transform DECOMPOSED back into position/rotation/scale — not stored as a matrix, because a Node's transform IS those three and everything downstream edits them. ```aiMatrix4x4::Decompose``` reads assimp's row-major matrix correctly on its own; transposing first would silently produce a transform that is almost right.
+- A node carrying several meshes — glTF calls them primitives, and they exist so each can have its own material — becomes the node plus one child per extra, named ```<node>_prim1```. A Renderable is one per Node, and the children inherit the parent's transform by sitting under it, which is exactly right: they are the same object cut up by material.
+- A mesh referenced by several nodes is uploaded ONCE and pointed at by several Renderables. That is the cache, and it is what makes two hundred wall tiles cost one upload.
+- Roots come back DETACHED. The caller decides whether they go under ROOT or are kept aside as a prefab template; returning them parented would take that choice away.
+- Parsed from MEMORY, not from a path: an asset in an APK is not a file, so assimp's default IO system has nothing to open. The ```"glb"``` hint picks the importer without a filename to guess from — and it is also why only .glb works, since a plain .gltf would send the parser looking for sibling .bin and image files that do not exist inside an APK.
+- assimp wraps the file in a root of its own, so that wrapper is dropped and the file's real top-level nodes are used — UNLESS the root carries geometry itself, in which case it is a real node and unwrapping would throw the model away.
+- Post-processing, and what is deliberately absent. NOT ```PreTransformVertices```, which flattens the hierarchy into one baked mesh — the exact opposite of wanting a node graph. NOT ```FlipUVs```: glTF puts the UV origin top-left and so does Vulkan; the flag exists for OpenGL's bottom-left and would turn every texture upside down. NOT ```FlipWindingOrder``` or ```MakeLeftHanded```: glTF is right-handed with CCW front faces, which is what the pipelines are built for.
+- The smoothing angle is set to 66 degrees. It only applies to a mesh that arrived with no normals, but assimp's default of 175 smooths practically everything — and a cube whose eight corners have been smoothed together reads as a lighting bug rather than a missing attribute.
+- Not read in this pass: materials (renderables come back with a null material), skins (a mesh with bones loads as static in its bind pose and logs it — its bone indices address a joint array only the skin defines, so extracting them early would mean inventing that ordering twice), animations, and the file's cameras and lights.
+
+---
+
+### Shaders (glsl in assets/shaders, tools/compile_shaders.py, cpp ShaderModule)
+- Wired into Gradle: ```compileShaders``` runs before ```preBuild```, so a build cannot package a stale .spv. A GLSL error fails the build with glslc's own file:line message — verified by breaking a shader on purpose. Gradle's up-to-date checking (```inputs.dir``` / ```outputs.dir```) keeps it quiet on a build that changed nothing.
+- **No shader compilation in the app.** Every module is built ahead of time and loaded from the APK as finished SPIR-V. The one failure mode of that arrangement is a shader that was edited and not recompiled, which then ships as the previous version — so the script exits non-zero on any failure, and tracks ```#include``` dependencies through glslc's ```-MD``` so editing an included file rebuilds what includes it.
+- Sources live in ```assets/shaders``` next to the .blend files (the authoring folder); ```tools/compile_shaders.py``` compiles them into ```app/src/main/assets/shaders```, which is what Gradle packages. The output is gitignored — it is derived, and a fresh clone runs the script before its first build.
+- Named ```<name>.<stage>.spv```, keeping the stage in the filename, so a material's vertex and fragment shaders cannot collide and the runtime path reads as what it is.
+- Built with ```-g``` and ```-O0```, on purpose and together. ```-g``` embeds the GLSL source (```OpSource```), the line mapping (```OpLine```) and the original identifiers (```OpName```) — that is what makes RenderDoc show the actual file instead of decompiled SPIR-V, and what lets its debugger step through it. Optimisation would fold and rename exactly what ```-g``` just recorded, so the two flags are not independent choices. ```--release``` flips both.
+- ```--target-env=vulkan1.3``` matters: without it glslc targets SPIR-V 1.0 and rejects later constructs while blaming the shader rather than the target.
+- **glslc comes from the NDK version app/build.gradle.kts pins**, ahead of ```ANDROID_NDK_HOME```. That is not the obvious order and it is deliberate: ```ANDROID_NDK_HOME``` is a machine-wide setting that drifts, and on this project's own machine it pointed at an NDK three major versions behind the pinned one. Shaders built by a compiler years apart from the toolchain that builds the renderer is a difference nobody goes looking for. An explicit ```GLSLC``` still wins over everything.
+- ```ShaderModule``` is move-only RAII rather than a load/destroy pair, because a material's ```CreatePipeline``` loads two modules and then has half a dozen early returns before ```vkCreateGraphicsPipelines``` — every one of them would leak. It is short-lived by design: a module is only needed while a pipeline is being built.
+- ```fullscreen.vert``` generates ONE oversized triangle from ```gl_VertexIndex```, not a quad, and not for elegance. A quad is two triangles meeting along the diagonal, and the GPU shades in 2x2 pixel quads, so every quad straddling that seam is shaded twice. A single clipped triangle has no seam.
+
+---
+
+## The Android side
+*Kotlin. Owns the window and the thread; owns no renderer state.*
+
+### NativeRenderer (java, dev.dongeronimo.arreconstructor::NativeRenderer)
+- Mirrors the c++ public interface.
+- Loads the library (triggering JN_OnLoad).
+- Holds no state and does no threading of its own. Every method except ```setAssetManager``` must be called from the render thread, and the native side relies on that and takes no locks.
+- ```setAssetManager``` is the exception on both counts: it only stores a pointer, and it runs before the render thread exists. It has to be called before the first ```surfaceCreated```, because the world is built from assets as soon as there is a device to build it on.
+
+---
+
+### VulkanSurfaceView (java, dev.dongeronimo.arreconstructor::VulkanSurfaceView)
+- The window Vulkan draws into. A SurfaceView and not a TextureView: it gets its own compositor layer, whose ANativeWindow is exactly what ```vkCreateAndroidSurfaceKHR``` wants. A TextureView's buffers detour through the view hierarchy's own rendering, which costs a copy per frame and adds latency.
+- Holds nothing but the render thread, and only while there is a surface to feed it. Surface, device and swapchain all have lifetimes tied to the surface rather than to the view or the Activity, so keeping any of them here would tie them to the wrong thing.
+- Its ```init``` hands the native side the AssetManager, before registering the surface callback so it cannot lose a race with a surface that already exists. The APPLICATION context's AssetManager, not the view's: native holds a global reference for the life of the process, and an Activity-scoped one would be pinned across configuration changes.
+
+---
+
+### RenderThread (java, dev.dongeronimo.arreconstructor::RenderThread)
 - Drives the c++ side of the renderer, using NativeRenderer.
 - Owns one thread, all native calls go thru it, so we can skip locking in cpp
 - Thread life = surface life
 - Comes from the Choreographer, dont use a while(true).
+
+---
+

@@ -28,6 +28,14 @@ class VulkanSurfaceView @JvmOverloads constructor(
     private var renderThread: RenderThread? = null
 
     init {
+        // Before the callback is registered, so it cannot lose a race with a
+        // surface that already exists: the world is loaded from assets the
+        // moment there is a device to load it onto.
+        //
+        // The application context's AssetManager and not this view's, because
+        // native holds a global reference to it for the life of the process and
+        // an Activity-scoped one would be pinned across configuration changes.
+        NativeRenderer.setAssetManager(context.applicationContext.assets)
         holder.addCallback(this)
     }
 

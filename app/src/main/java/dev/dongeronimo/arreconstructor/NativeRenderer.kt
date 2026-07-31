@@ -1,5 +1,6 @@
 package dev.dongeronimo.arreconstructor
 
+import android.content.res.AssetManager
 import android.view.Surface
 
 /**
@@ -19,6 +20,21 @@ object NativeRenderer {
         // being used before the other.
         System.loadLibrary("arreconstructor")
     }
+
+    /**
+     * Hands the native side the [AssetManager] it reads models and shaders
+     * through. Must be called before the first [surfaceCreated], since the world
+     * is built from assets as soon as there is a device to build it on.
+     *
+     * An app's assets are not files: they live inside the APK, usually
+     * compressed, so there is no path native code could open. Native keeps a
+     * global JNI reference to [assets] — the AAssetManager pointer it derives is
+     * only valid while the Java object is alive.
+     *
+     * Unlike everything else here, this one does NOT have to be on the render
+     * thread: it only stores a pointer, and it runs before that thread exists.
+     */
+    external fun setAssetManager(assets: AssetManager)
 
     /**
      * The window now exists and can be rendered to. [surface] is only borrowed

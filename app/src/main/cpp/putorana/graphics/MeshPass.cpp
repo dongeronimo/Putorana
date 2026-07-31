@@ -418,8 +418,16 @@ void MeshPass::Render(const FrameContext& frame, Node& root) {
                     VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, VK_ACCESS_2_SHADER_READ_BIT,
                     VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
                     VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
+    // DEPTH_STENCIL_ATTACHMENT_OPTIMAL and not the depth-only
+    // DEPTH_ATTACHMENT_OPTIMAL, even though this image has no stencil aspect.
+    // The separate layouts came in with VK_KHR_separate_depth_stencil_layouts
+    // and using one requires the separateDepthStencilLayouts feature to be
+    // enabled — which PhysicalDevice does not ask for, because the rule there is
+    // that nothing goes in the required list unless a conforming 1.3 device
+    // cannot refuse it. The combined layout needs no feature and behaves
+    // identically for a format that has only depth.
     SetImageBarrier(frame.commandBuffer, *depth_, VK_IMAGE_LAYOUT_UNDEFINED,
-                    VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+                    VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
                     VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT, VK_ACCESS_2_NONE,
                     VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT,
                     VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT);
@@ -435,7 +443,7 @@ void MeshPass::Render(const FrameContext& frame, Node& root) {
     VkRenderingAttachmentInfo depthAttachment{};
     depthAttachment.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
     depthAttachment.imageView = depth_->view();
-    depthAttachment.imageLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
+    depthAttachment.imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
     depthAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
     // DONT_CARE: nothing reads the depth after this pass. On a tiler that is the
     // difference between writing a full screen of depth out to RAM and never
