@@ -2,6 +2,7 @@ package dev.dongeronimo.arreconstructor
 
 import android.content.Context
 import android.util.AttributeSet
+import android.view.Surface
 import android.view.SurfaceHolder
 import android.view.SurfaceView
 
@@ -49,6 +50,20 @@ class VulkanSurfaceView @JvmOverloads constructor(
     }
 
     override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
+        // ARCore first, and from THIS thread rather than the render thread. It
+        // needs the display rotation, which is a property of the view hierarchy,
+        // and it is the one piece of per-surface information the session — whose
+        // life is the activity's, not the surface's — still has to be told.
+        //
+        // Every rotation comes through here, which is what keeps the camera
+        // background upright without anything having to be rebuilt: only the UVs
+        // ARCore hands back change.
+        // View.getDisplay() is a platform type, so Kotlin will hand it over
+        // without complaint and it is null for a detached view. A surface that
+        // is changing size is attached by definition, but the fallback costs
+        // nothing and beats an NPE on a path this hard to reproduce.
+        NativeAr.setDisplayGeometry(display?.rotation ?: Surface.ROTATION_0, width, height)
+
         renderThread?.surfaceChanged(format, width, height)
     }
 

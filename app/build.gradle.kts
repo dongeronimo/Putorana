@@ -20,6 +20,13 @@ android {
         externalNativeBuild {
             cmake {
                 cppFlags += "-std=c++17"
+                // O CMake vai buscar o mesmo AAR que o `implementation` abaixo,
+                // para extrair dele o libarcore_sdk_c.so contra o qual se linka
+                // (ver src/main/cpp/CMakeLists.txt). A versão vem daqui para que
+                // o catálogo continue a ser o único sítio que a decide — se as
+                // duas divergissem, linkava-se contra uma versão e empacotava-se
+                // outra.
+                arguments += "-DARCORE_VERSION=${libs.versions.arcore.get()}"
             }
         }
         ndk {
@@ -91,6 +98,11 @@ tasks.named("preBuild") {
 }
 
 dependencies {
+
+    // Traz o classes.jar (ArCoreApk, para o fluxo de instalação/permissões), o
+    // merge do manifesto, e o empacotamento de jni/**/*.so no APK. O link
+    // nativo contra esse .so é tratado à parte, pelo CMake.
+    implementation(libs.arcore)
 
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.appcompat)

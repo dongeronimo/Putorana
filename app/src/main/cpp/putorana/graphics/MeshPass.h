@@ -107,8 +107,14 @@ public:
     /**
      * Records the pass. Targets are (re)built here if the extent changed, so a
      * resize or a rotation needs no separate call.
+     *
+     * `transparentClear` clears the colour target to zero alpha instead of an
+     * opaque colour, which is what tells the final pass to show the camera feed
+     * wherever no geometry was drawn. Pass false — the default — when there is
+     * no feed to show, and the opaque clear then carries straight through the
+     * final pass's mix unchanged.
      * */
-    void Render(const FrameContext& frame, Node& root);
+    void Render(const FrameContext& frame, Node& root, bool transparentClear = false);
 
     /**
      * What the pass drew, left in SHADER_READ_ONLY_OPTIMAL for the final pass to

@@ -83,26 +83,31 @@ public:
     //
     // Two different storage strategies here, and the reason is not taste.
     //
-    // Renderable and Camera are concrete, final, small value types. optional
-    // holds them inline: no allocation, no indirection, and `if (node.camera)`
-    // reads the same as the TypeScript `if (node.camera)`.
+    // Renderable is a concrete, final, small value type. optional holds it
+    // inline: no allocation, no indirection, and `if (node.renderable)` reads
+    // the same as the TypeScript `if (node.renderable)`.
     //
-    // Light cannot use optional. It is a polymorphic base — the actual object is
-    // a PointLight, a SpotLight or a DirectionalLight — and optional<Light>
-    // stores a Light by value, which would slice the cone angles off a spot.
-    // (It would not even compile: Light's constructor is protected precisely so
-    // that a bare Light cannot exist.) Polymorphism means a pointer, so it is a
-    // unique_ptr, and null means no light.
+    // Light and Camera cannot use optional. Both are polymorphic bases — the
+    // actual object is a PointLight or a SpotLight, a PerspectiveCamera or an
+    // ArCamera — and optional<Base> stores a Base by value, which would slice
+    // the cone angles off a spot and ARCore's whole projection off a camera.
+    // (Neither would even compile: both constructors are protected precisely so
+    // that a bare base cannot exist.) Polymorphism means a pointer, so both are
+    // unique_ptr, and null means the component is absent.
 
     /** Present means this node is drawn. */
     std::optional<Renderable> renderable;
 
     /**
-     * Present means this node is a camera. The VIEW matrix is the inverse of
+     * Non-null means this node is a camera. The VIEW matrix is the inverse of
      * this node's world matrix — the camera looks down its own -Z, so the
      * transform below is the only thing that positions it.
+     *
+     * That holds for an ArCamera too, and deliberately: it writes ARCore's pose
+     * into this node's transform rather than keeping a view matrix of its own,
+     * so there is exactly one answer to "where is the camera" in the scene.
      * */
-    std::optional<Camera> camera;
+    std::unique_ptr<Camera> camera;
 
     /**
      * Non-null means this node is a light. Its world position and its -Z are

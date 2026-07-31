@@ -200,6 +200,12 @@ bool Device::CreateLogicalDevice() {
         __android_log_print(ANDROID_LOG_ERROR, kLogTag, "%s", error.c_str());
         return false;
     }
+
+    profiler_ = GpuProfiler::Create(*this, error);
+    if (profiler_ == nullptr) {
+        __android_log_print(ANDROID_LOG_ERROR, kLogTag, "%s", error.c_str());
+        return false;
+    }
     return true;
 }
 
@@ -282,6 +288,7 @@ void Device::OnSurfaceDestroyed() {
         // vmaDestroyAllocator would only report as a leak assert.
         world_.reset();
         swapchain_.reset();
+        profiler_.reset();
         frames_.reset();
         // After the world: its materials and passes hold sets allocated here,
         // and destroying a pool frees every set that came out of it.

@@ -35,4 +35,30 @@
         app:layout_constraintTop_toTopOf="parent"
         tools:text="VkInstance OK" />
 
+    <!-- GPU timings, top right. Declared AFTER the surface view for the same
+         reason the report above is: the surface composites behind the window,
+         so declaration order here is the z order, and last means on top. No
+         setZOrderOnTop, no extra window, no elevation — those exist for putting
+         a SurfaceView above other views, which is the opposite problem.
+
+         A background rather than just a shadow, because unlike a one line report
+         this is a block of numbers over a live camera image, and a shadow alone
+         does not survive a busy scene. -->
+    <TextView
+        android:id="@+id/gpu_timings"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_margin="12dp"
+        android:background="#99000000"
+        android:fontFamily="monospace"
+        android:paddingStart="8dp"
+        android:paddingTop="4dp"
+        android:paddingEnd="8dp"
+        android:paddingBottom="4dp"
+        android:textColor="#FF80FF80"
+        android:textSize="11sp"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintTop_toTopOf="parent"
+        tools:text="frame  4.21 ms\nmesh   1.02 ms" />
+
 </androidx.constraintlayout.widget.ConstraintLayout>

@@ -4,6 +4,8 @@
 #include "ShaderModule.h"
 #include "Swapchain.h"
 
+#include <cstring>
+
 namespace putorana::graphics {
 
 namespace {
@@ -11,12 +13,64 @@ namespace {
 constexpr const char* kVertexShader = "shaders/fullscreen.vert.spv";
 constexpr const char* kFragmentShader = "shaders/composite.frag.spv";
 
+/** True for the _SRGB colour formats the swapchain is willing to choose. */
+bool IsSrgb(VkFormat format) {
+    switch (format) {
+        case VK_FORMAT_R8G8B8A8_SRGB:
+        case VK_FORMAT_B8G8R8A8_SRGB:
+            return true;
+        default:
+            return false;
+    }
+}
+
+void SetImageBarrier(VkCommandBuffer commandBuffer, VkImage image, VkImageLayout oldLayout,
+                     VkImageLayout newLayout, VkPipelineStageFlags2 srcStage,
+                     VkAccessFlags2 srcAccess, VkPipelineStageFlags2 dstStage,
+                     VkAccessFlags2 dstAccess) {
+    VkImageMemoryBarrier2 barrier{};
+    barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
+    barrier.srcStageMask = srcStage;
+    barrier.srcAccessMask = srcAccess;
+    barrier.dstStageMask = dstStage;
+    barrier.dstAccessMask = dstAccess;
+    barrier.oldLayout = oldLayout;
+    barrier.newLayout = newLayout;
+    barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.image = image;
+    barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    barrier.subresourceRange.levelCount = 1;
+    barrier.subresourceRange.layerCount = 1;
+
+    VkDependencyInfo dependency{};
+    dependency.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+    dependency.imageMemoryBarrierCount = 1;
+    dependency.pImageMemoryBarriers = &barrier;
+    vkCmdPipelineBarrier2(commandBuffer, &dependency);
+}
+
 } // namespace
 
 std::unique_ptr<FinalPass> FinalPass::Create(Device& device, VkFormat targetFormat,
                                              std::string& error) {
     auto pass = std::unique_ptr<FinalPass>(new FinalPass());
     pass->handle_ = device.handle();
+    pass->push_.srgbTarget = IsSrgb(targetFormat) ? 1 : 0;
+
+    // The stand-in for the camera planes. One texel, cleared to black on first
+    // use, and only ever sampled on frames where the mix factor is 1 and its
+    // contribution is therefore multiplied away — see EnsurePlaceholder.
+    Image::Desc placeholderDesc;
+    placeholderDesc.name = "camera placeholder";
+    placeholderDesc.extent = {1, 1};
+    placeholderDesc.format = VK_FORMAT_R8_UNORM;
+    placeholderDesc.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    pass->placeholder_ =
+            Image::Create(device.allocator().handle(), pass->handle_, placeholderDesc, error);
+    if (pass->placeholder_ == nullptr) {
+        return nullptr;
+    }
 
     VkSamplerCreateInfo samplerInfo{};
     samplerInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
@@ -33,16 +87,21 @@ std::unique_ptr<FinalPass> FinalPass::Create(Device& device, VkFormat targetForm
         return nullptr;
     }
 
-    VkDescriptorSetLayoutBinding binding{};
-    binding.binding = 0;
-    binding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    binding.descriptorCount = 1;
-    binding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    // 0 is the mesh pass's output, 1 and 2 the camera's luma and chroma planes.
+    // Each carries its own sampler, which is why the NEAREST one above can serve
+    // the 1:1 copy while the feed's LINEAR one does the rescale.
+    VkDescriptorSetLayoutBinding bindings[3]{};
+    for (uint32_t i = 0; i < 3; ++i) {
+        bindings[i].binding = i;
+        bindings[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        bindings[i].descriptorCount = 1;
+        bindings[i].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    }
 
     VkDescriptorSetLayoutCreateInfo layoutInfo{};
     layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-    layoutInfo.bindingCount = 1;
-    layoutInfo.pBindings = &binding;
+    layoutInfo.bindingCount = 3;
+    layoutInfo.pBindings = bindings;
     if (vkCreateDescriptorSetLayout(pass->handle_, &layoutInfo, nullptr, &pass->setLayout_) !=
         VK_SUCCESS) {
         error = "final pass: could not create the descriptor set layout";
@@ -55,10 +114,20 @@ std::unique_ptr<FinalPass> FinalPass::Create(Device& device, VkFormat targetForm
         return nullptr;
     }
 
+    // One range covering both stages, matching the single block declared in both
+    // shaders: the vertex stage reads the camera UVs and the fragment stage the
+    // two flags.
+    VkPushConstantRange pushRange{};
+    pushRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+    pushRange.offset = 0;
+    pushRange.size = sizeof(PushConstants);
+
     VkPipelineLayoutCreateInfo pipelineLayoutInfo{};
     pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
     pipelineLayoutInfo.setLayoutCount = 1;
     pipelineLayoutInfo.pSetLayouts = &pass->setLayout_;
+    pipelineLayoutInfo.pushConstantRangeCount = 1;
+    pipelineLayoutInfo.pPushConstantRanges = &pushRange;
     if (vkCreatePipelineLayout(pass->handle_, &pipelineLayoutInfo, nullptr,
                                &pass->pipelineLayout_) != VK_SUCCESS) {
         error = "final pass: could not create the pipeline layout";
@@ -170,39 +239,97 @@ FinalPass::~FinalPass() {
     }
 }
 
-bool FinalPass::PointAt(const Image& source) {
-    if (source.view() == boundView_) {
+void FinalPass::EnsurePlaceholder(const FrameContext& frame) {
+    if (placeholderReady_) {
+        return;
+    }
+    placeholderReady_ = true;
+
+    // Cleared rather than merely transitioned. Sampling an image whose contents
+    // are undefined is legal and its result is multiplied by zero here anyway,
+    // but a texel of garbage in a RenderDoc capture is a lead worth not leaving
+    // lying around.
+    SetImageBarrier(frame.commandBuffer, placeholder_->handle(), VK_IMAGE_LAYOUT_UNDEFINED,
+                    VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_PIPELINE_STAGE_2_NONE,
+                    VK_ACCESS_2_NONE, VK_PIPELINE_STAGE_2_CLEAR_BIT,
+                    VK_ACCESS_2_TRANSFER_WRITE_BIT);
+
+    const VkClearColorValue black{};
+    VkImageSubresourceRange range{};
+    range.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    range.levelCount = 1;
+    range.layerCount = 1;
+    vkCmdClearColorImage(frame.commandBuffer, placeholder_->handle(),
+                         VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &black, 1, &range);
+
+    SetImageBarrier(frame.commandBuffer, placeholder_->handle(),
+                    VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                    VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_PIPELINE_STAGE_2_CLEAR_BIT,
+                    VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+                    VK_ACCESS_2_SHADER_READ_BIT);
+}
+
+bool FinalPass::PointAt(const Image& source, VkImageView luma, VkImageView chroma,
+                        VkSampler feedSampler) {
+    if (source.view() == boundView_ && luma == boundLuma_ && chroma == boundChroma_) {
         return true;
     }
     // The set is bound by frames that may still be in flight, and rewriting one
-    // the GPU is reading is undefined. This only happens on a resize, when the
-    // mesh pass has already waited for the same reason.
+    // the GPU is reading is undefined. This happens on a resize, and once more
+    // when the first camera image replaces the placeholder.
     if (boundView_ != VK_NULL_HANDLE) {
         vkDeviceWaitIdle(handle_);
     }
 
-    VkDescriptorImageInfo imageInfo{};
-    imageInfo.sampler = sampler_;
-    imageInfo.imageView = source.view();
-    imageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    VkDescriptorImageInfo imageInfos[3]{};
+    imageInfos[0].sampler = sampler_;
+    imageInfos[0].imageView = source.view();
+    imageInfos[0].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    imageInfos[1].sampler = feedSampler;
+    imageInfos[1].imageView = luma;
+    imageInfos[1].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    imageInfos[2].sampler = feedSampler;
+    imageInfos[2].imageView = chroma;
+    imageInfos[2].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
-    VkWriteDescriptorSet write{};
-    write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    write.dstSet = descriptorSet_;
-    write.dstBinding = 0;
-    write.descriptorCount = 1;
-    write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    write.pImageInfo = &imageInfo;
-    vkUpdateDescriptorSets(handle_, 1, &write, 0, nullptr);
+    VkWriteDescriptorSet writes[3]{};
+    for (uint32_t i = 0; i < 3; ++i) {
+        writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        writes[i].dstSet = descriptorSet_;
+        writes[i].dstBinding = i;
+        writes[i].descriptorCount = 1;
+        writes[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        writes[i].pImageInfo = &imageInfos[i];
+    }
+    vkUpdateDescriptorSets(handle_, 3, writes, 0, nullptr);
 
     boundView_ = source.view();
+    boundLuma_ = luma;
+    boundChroma_ = chroma;
     return true;
 }
 
-void FinalPass::Render(const FrameContext& frame, const Image& source) {
-    if (!PointAt(source)) {
+void FinalPass::Render(const FrameContext& frame, const Image& source, const CameraFeed* feed) {
+    const bool hasFeed = feed != nullptr && feed->ready();
+    if (!hasFeed) {
+        // Nothing to sample yet, so the placeholder goes into both feed
+        // bindings. The mesh pass cleared opaquely in this case, so the mix
+        // factor is 1 everywhere and what is bound cannot show up.
+        EnsurePlaceholder(frame);
+    }
+
+    const VkImageView luma = hasFeed ? feed->lumaView() : placeholder_->view();
+    const VkImageView chroma = hasFeed ? feed->chromaView() : placeholder_->view();
+    const VkSampler feedSampler = hasFeed ? feed->sampler() : sampler_;
+    if (!PointAt(source, luma, chroma, feedSampler)) {
         return;
     }
+
+    if (hasFeed) {
+        std::memcpy(push_.cameraUv, feed->uv(), sizeof(push_.cameraUv));
+        push_.vFirst = feed->vFirst() ? 1 : 0;
+    }
+
     const VkExtent2D extent = frame.swapchain->extent();
 
     VkRenderingAttachmentInfo colorAttachment{};
@@ -236,6 +363,9 @@ void FinalPass::Render(const FrameContext& frame, const Image& source) {
     vkCmdBindPipeline(frame.commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_);
     vkCmdBindDescriptorSets(frame.commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout_,
                             0, 1, &descriptorSet_, 0, nullptr);
+    vkCmdPushConstants(frame.commandBuffer, pipelineLayout_,
+                       VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0,
+                       sizeof(push_), &push_);
     // Three vertices, no buffers. The shader builds the triangle from their
     // indices — see fullscreen.vert on why one triangle and not a quad.
     vkCmdDraw(frame.commandBuffer, 3, 1, 0, 0);

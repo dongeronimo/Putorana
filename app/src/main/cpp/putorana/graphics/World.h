@@ -14,6 +14,7 @@
 namespace putorana::graphics {
 
 class Device;
+class GpuProfiler;
 class Swapchain;
 
 /**
@@ -45,6 +46,15 @@ struct FrameContext {
 
     /** The image acquired for this frame, already in COLOR_ATTACHMENT_OPTIMAL. */
     uint32_t imageIndex = 0;
+
+    /**
+     * Where a pass declares how long it took on the GPU. Null when the device
+     * cannot do timestamps, so GpuScope is a no-op rather than a crash.
+     *
+     * A raw pointer and not a reference because it may legitimately be absent,
+     * and because FrameContext is assembled field by field by the frame loop.
+     * */
+    GpuProfiler* profiler = nullptr;
 };
 
 /**

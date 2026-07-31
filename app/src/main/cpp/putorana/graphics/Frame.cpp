@@ -3,6 +3,7 @@
 #include "Device.h"
 #include "HelloWorld.h"
 #include "World.h"
+#include "putorana/ar/Subsystem.h"
 
 #include <android/log.h>
 
@@ -204,6 +205,11 @@ void RecordFrame(VkCommandBuffer commandBuffer, const Swapchain& swapchain, uint
     beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     vkBeginCommandBuffer(commandBuffer, &beginInfo);
 
+    // First thing in the buffer, and it has to be: this records the query pool
+    // reset, which must precede every timestamp written into it this frame.
+    GpuProfiler& profiler = device_holder::Get().profiler();
+    profiler.BeginFrame(commandBuffer, frameIndex);
+
     // UNDEFINED as the old layout throws the previous contents away, and on a
     // tiler that is not a small thing: preserving pixels means reading the whole
     // image back into tile memory before drawing over it.
@@ -230,6 +236,11 @@ void RecordFrame(VkCommandBuffer commandBuffer, const Swapchain& swapchain, uint
         frame.frameIndex = frameIndex;
         frame.swapchain = &swapchain;
         frame.imageIndex = imageIndex;
+        frame.profiler = &profiler;
+        // The outermost scope, so the overlay can show what the passes inside it
+        // do NOT account for — barriers, transitions, and whatever the driver
+        // does between them.
+        GpuScope scope(frame, "frame");
         world->Render(frame);
     } else {
         RecordEmptyClear(commandBuffer, swapchain, imageIndex, frameTimeNanos);
@@ -273,6 +284,21 @@ void DrawFrame(int64_t frameTimeNanos) {
 
     // Needs the swapchain, which RecreateSwapchainIfNeeded has just guaranteed.
     InstallWorldIfNeeded(device);
+
+    // The AR session's tick, and it is FIRST for two reasons.
+    //
+    // It blocks — up to ARCore's built-in 66ms — waiting for the next camera
+    // image, so it has to happen before BeginFrame and before the acquire below,
+    // or it would sleep while holding a swapchain image and a frame slot.
+    //
+    // And it is the thing everything else this frame is about: the camera image
+    // the background draws, and soon the pose the world's camera follows. A tick
+    // buried inside a render pass would leave whichever pass ran first working
+    // from the previous frame's answer, which in AR is visible as geometry
+    // sliding against the world.
+    if (ar::Subsystem* arSubsystem = ar::subsystem_holder::Get()) {
+        arSubsystem->Update();
+    }
 
     // Simulation before recording, and outside the acquire: the world touches no
     // Vulkan object here, it only moves nodes and closes their matrices. Nothing

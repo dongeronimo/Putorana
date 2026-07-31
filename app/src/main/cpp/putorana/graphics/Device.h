@@ -4,6 +4,7 @@
 #include "Allocator.h"
 #include "DescriptorPool.h"
 #include "FrameRing.h"
+#include "GpuProfiler.h"
 #include "PhysicalDevice.h"
 #include "Swapchain.h"
 #include "volk.h"
@@ -136,6 +137,15 @@ public:
     DescriptorPool& descriptorPool() const { return *descriptorPool_; }
 
     /**
+     * GPU timing, for the debug overlay. Device lifetime — its query pools
+     * belong to the VkDevice — so the Kotlin side must tolerate it going away
+     * and coming back when the app is backgrounded.
+     *
+     * Never null while HasSurface(), but may be disabled: see GpuProfiler.
+     * */
+    GpuProfiler& profiler() const { return *profiler_; }
+
+    /**
      * The scene being drawn, or null before one is installed.
      *
      * Device owns it for one reason: a world's meshes are allocations from the
@@ -180,6 +190,7 @@ private:
     std::unique_ptr<Allocator> allocator_;
     std::unique_ptr<DescriptorPool> descriptorPool_;
     std::unique_ptr<FrameRing> frames_;
+    std::unique_ptr<GpuProfiler> profiler_;
     std::unique_ptr<Swapchain> swapchain_;
     /** Declared last, so it is destroyed first — before the allocator it drew from. */
     std::unique_ptr<World> world_;

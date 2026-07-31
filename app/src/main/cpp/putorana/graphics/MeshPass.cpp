@@ -297,7 +297,7 @@ const MaterialPipeline* MeshPass::PipelineFor(const Material& material, VertexFo
 }
 
 void MeshPass::Collect(Node& node, std::vector<DrawItem>& items, const Node*& cameraNode) {
-    if (cameraNode == nullptr && node.camera.has_value()) {
+    if (cameraNode == nullptr && node.camera != nullptr) {
         cameraNode = &node; // first camera found is THE camera
     }
 
@@ -329,7 +329,7 @@ void MeshPass::Collect(Node& node, std::vector<DrawItem>& items, const Node*& ca
     }
 }
 
-void MeshPass::Render(const FrameContext& frame, Node& root) {
+void MeshPass::Render(const FrameContext& frame, Node& root, bool transparentClear) {
     const VkExtent2D extent = frame.swapchain->extent();
     if (!EnsureTargets(extent)) {
         return;
@@ -438,7 +438,14 @@ void MeshPass::Render(const FrameContext& frame, Node& root) {
     colorAttachment.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
     colorAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
     colorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-    colorAttachment.clearValue.color = {{0.39f, 0.58f, 0.93f, 1.0f}}; // cornflower blue
+    // Alpha is the whole message to the final pass: 0 means "nothing was drawn
+    // here, show what is behind", and behind is the camera. With no camera there
+    // is nothing behind, so the clear is opaque and the final pass's mix keeps
+    // this colour throughout — which is how the cornflower field survives on a
+    // device with no ARCore, without a second code path anywhere.
+    colorAttachment.clearValue.color =
+            transparentClear ? VkClearColorValue{{0.0f, 0.0f, 0.0f, 0.0f}}
+                             : VkClearColorValue{{0.39f, 0.58f, 0.93f, 1.0f}}; // cornflower blue
 
     VkRenderingAttachmentInfo depthAttachment{};
     depthAttachment.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
