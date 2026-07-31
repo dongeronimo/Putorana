@@ -11,6 +11,28 @@ cmake_minimum_required(VERSION 3.22.1)
 # build script scope).
 project("arreconstructor")
 
+include(FetchContent)
+FetchContent_Declare(
+        assimp
+        GIT_REPOSITORY https://github.com/assimp/assimp.git
+        GIT_TAG v5.3.1
+        GIT_SHALLOW TRUE
+)
+# Configure Assimp - minimal build
+set(ASSIMP_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(ASSIMP_BUILD_ASSIMP_TOOLS OFF CACHE BOOL "" FORCE)
+set(ASSIMP_INSTALL OFF CACHE BOOL "" FORCE)
+set(ASSIMP_BUILD_ALL_IMPORTERS_BY_DEFAULT OFF CACHE BOOL "" FORCE)
+set(ASSIMP_BUILD_ALL_EXPORTERS_BY_DEFAULT OFF CACHE BOOL "" FORCE)
+set(ASSIMP_BUILD_GLTF_IMPORTER ON CACHE BOOL "" FORCE)
+set(ASSIMP_BUILD_GLB_IMPORTER ON CACHE BOOL "" FORCE)
+set(ASSIMP_BUILD_STL_EXPORTER ON CACHE BOOL "" FORCE)
+set(ASSIMP_ANDROID_JNIIOSYSTEM OFF CACHE BOOL "" FORCE)
+set(ASSIMP_NO_EXPORT ON CACHE BOOL "" FORCE)
+message(STATUS "Fetching dependencies...")
+FetchContent_MakeAvailable(assimp)
+
+
 # Creates and names a library, sets it as either STATIC
 # or SHARED, and provides the relative paths to its source code.
 # You can define multiple libraries, and CMake builds them for you.
@@ -25,12 +47,24 @@ project("arreconstructor")
 # for GameActivity/NativeActivity derived applications, the same library name must be
 # used in the AndroidManifest.xml file.
 add_library(${CMAKE_PROJECT_NAME} SHARED
+        putorana/graphics/Allocator.cpp
+        putorana/graphics/Buffer.cpp
+        putorana/graphics/Camera.cpp
+        putorana/graphics/DescriptorPool.cpp
         putorana/graphics/Device.cpp
         putorana/graphics/Frame.cpp
         putorana/graphics/FrameRing.cpp
+        putorana/graphics/Image.cpp
         putorana/graphics/Instance.cpp
+        putorana/graphics/Light.cpp
+        putorana/graphics/Material.cpp
+        putorana/graphics/Mesh.cpp
+        putorana/graphics/MeshPass.cpp
+        putorana/graphics/Node.cpp
         putorana/graphics/PhysicalDevice.cpp
+        putorana/graphics/Renderable.cpp
         putorana/graphics/Swapchain.cpp
+        putorana/graphics/World.cpp
         # volk's implementation unit: dlopen's libvulkan.so and defines the
         # global vk* function pointers that every other TU here resolves against.
         third_party/volk/volk.c
@@ -80,4 +114,5 @@ target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE
 target_link_libraries(${CMAKE_PROJECT_NAME}
         # List libraries link to the target library
         android
+        assimp::assimp
         log)

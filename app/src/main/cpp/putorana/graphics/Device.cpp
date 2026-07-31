@@ -1,6 +1,9 @@
 #include "Device.h"
 
 #include "Instance.h"
+// Needed here and not in the header: the unique_ptr<World> member cannot be
+// destroyed without the complete type, and both destructors live in this file.
+#include "World.h"
 
 #include <android/log.h>
 
@@ -37,6 +40,16 @@ const char* SurfaceResultName(VkResult result) {
 
 Device::~Device() {
     OnSurfaceDestroyed();
+}
+
+void Device::SetWorld(std::unique_ptr<World> world) {
+    if (world_ != nullptr) {
+        // The outgoing world's buffers may still be read by a frame in flight.
+        // Nothing else here can know that, so wait before letting it go.
+        vkDeviceWaitIdle(device_);
+        world_.reset();
+    }
+    world_ = std::move(world);
 }
 
 void Device::OnSurfaceCreated(ANativeWindow* window) {
@@ -165,6 +178,23 @@ bool Device::CreateLogicalDevice() {
     // Device-level, so it could not have been called before volkLoadDevice.
     vkGetDeviceQueue(device_, physicalDevice_->queueFamily(), 0, &queue_);
 
+    // After volkLoadDevice and not before: VMA is built with
+    // VMA_DYNAMIC_VULKAN_FUNCTIONS and resolves its entry points through the
+    // proc-address functions volk has just wired up.
+    allocator_ = Allocator::Create(instance_, physicalDevice_->handle(), device_, error);
+    if (allocator_ == nullptr) {
+        __android_log_print(ANDROID_LOG_ERROR, kLogTag, "%s", error.c_str());
+        return false;
+    }
+    __android_log_print(ANDROID_LOG_INFO, kLogTag, "allocator: %s",
+                        allocator_->Describe().c_str());
+
+    descriptorPool_ = DescriptorPool::Create(device_, error);
+    if (descriptorPool_ == nullptr) {
+        __android_log_print(ANDROID_LOG_ERROR, kLogTag, "%s", error.c_str());
+        return false;
+    }
+
     frames_ = FrameRing::Create(device_, physicalDevice_->queueFamily(), error);
     if (frames_ == nullptr) {
         __android_log_print(ANDROID_LOG_ERROR, kLogTag, "%s", error.c_str());
@@ -245,8 +275,22 @@ void Device::OnSurfaceDestroyed() {
         // that points back here.
         vkDeviceWaitIdle(device_);
         // Before the device: everything below was created from it.
+        //
+        // The world goes first of all. Its meshes are allocations from the
+        // allocator three lines down, and its render targets are images from the
+        // same place — outliving either would be a use-after-free that
+        // vmaDestroyAllocator would only report as a leak assert.
+        world_.reset();
         swapchain_.reset();
         frames_.reset();
+        // After the world: its materials and passes hold sets allocated here,
+        // and destroying a pool frees every set that came out of it.
+        descriptorPool_.reset();
+        // Last of the three, because buffers and images are carved out of it.
+        // vmaDestroyAllocator asserts in debug when an allocation is still
+        // alive, which is exactly the signal wanted if a mesh ever outlives the
+        // surface it was loaded for.
+        allocator_.reset();
         vkDestroyDevice(device_, nullptr);
         device_ = VK_NULL_HANDLE;
         // volk's global device-level pointers now refer to a destroyed device.

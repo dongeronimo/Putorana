@@ -1,6 +1,8 @@
 #ifndef PUTORANA_GRAPHICS_DEVICE_H
 #define PUTORANA_GRAPHICS_DEVICE_H
 
+#include "Allocator.h"
+#include "DescriptorPool.h"
 #include "FrameRing.h"
 #include "PhysicalDevice.h"
 #include "Swapchain.h"
@@ -13,6 +15,11 @@
 #include <optional>
 
 namespace putorana::graphics {
+
+// Forward declared rather than included: World sits far above this class and
+// pulls in the whole scene graph. Device.cpp includes it, which is where the
+// unique_ptr below needs the complete type.
+class World;
 
 /**
  * Everything whose lifetime follows the Android surface: the ANativeWindow, the
@@ -112,6 +119,40 @@ public:
      * */
     FrameRing& frames() const { return *frames_; }
 
+    /**
+     * Where every VkBuffer and VkImage comes from. Valid whenever HasSurface(),
+     * and only then — it is destroyed with the VkDevice, so anything holding an
+     * allocation has to be released before the surface goes away. Pressing Home
+     * runs that teardown, so "load the meshes once at startup" is not an option
+     * in this app: whatever owns them has to be rebuilt with the device.
+     * */
+    const Allocator& allocator() const { return *allocator_; }
+
+    /**
+     * Where materials and render passes get their descriptor sets. Device
+     * lifetime for the same reason as the allocator: a VkDescriptorSet belongs
+     * to a pool that belongs to a VkDevice, and all three go at once.
+     * */
+    DescriptorPool& descriptorPool() const { return *descriptorPool_; }
+
+    /**
+     * The scene being drawn, or null before one is installed.
+     *
+     * Device owns it for one reason: a world's meshes are allocations from the
+     * allocator below, so the world MUST be gone before that allocator is. Any
+     * other owner turns that into a rule somebody has to remember on a teardown
+     * path that runs every time the app is backgrounded. Owned here, the
+     * ordering is simply what the destructor does.
+     * */
+    World* world() const { return world_.get(); }
+
+    /**
+     * Installs the scene, destroying whatever was there. Call once there is a
+     * swapchain — a world builds its pipelines against the surface format, so it
+     * cannot be constructed any earlier.
+     * */
+    void SetWorld(std::unique_ptr<World> world);
+
     int32_t width() const { return width_; }
     int32_t height() const { return height_; }
 
@@ -136,8 +177,12 @@ private:
     std::optional<PhysicalDevice> physicalDevice_;
     VkDevice device_ = VK_NULL_HANDLE;
     VkQueue queue_ = VK_NULL_HANDLE;
+    std::unique_ptr<Allocator> allocator_;
+    std::unique_ptr<DescriptorPool> descriptorPool_;
     std::unique_ptr<FrameRing> frames_;
     std::unique_ptr<Swapchain> swapchain_;
+    /** Declared last, so it is destroyed first — before the allocator it drew from. */
+    std::unique_ptr<World> world_;
 
     int32_t width_ = 0;
     int32_t height_ = 0;

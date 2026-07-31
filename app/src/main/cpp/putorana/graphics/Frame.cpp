@@ -1,9 +1,11 @@
 #include "Frame.h"
 
 #include "Device.h"
+#include "World.h"
 
 #include <android/log.h>
 
+#include <algorithm>
 #include <cmath>
 
 namespace putorana::graphics {
@@ -19,6 +21,31 @@ constexpr int64_t kOneSecondNanos = 1000000000;
 // enough.
 int64_t g_reportStartNanos = 0;
 uint32_t g_framesSinceReport = 0;
+
+/** Vsync timestamp of the previous frame, for the delta handed to the world. */
+int64_t g_lastFrameNanos = 0;
+
+/**
+ * Seconds since the previous frame, clamped.
+ *
+ * The clamp is the whole reason this is a function. Coming back from background
+ * produces a gap of seconds, and every consumer of a delta — animation, physics,
+ * a follow camera — integrates it: unclamped, the first frame back teleports
+ * everything. Capping at 100ms turns that into a hitch instead, which is what
+ * every engine does and for the same reason.
+ * */
+float DeltaSeconds(int64_t frameTimeNanos) {
+    constexpr int64_t kMaxDeltaNanos = 100000000; // 100ms
+
+    if (g_lastFrameNanos == 0) {
+        g_lastFrameNanos = frameTimeNanos;
+        return 0.0f;
+    }
+    const int64_t delta =
+            std::clamp(frameTimeNanos - g_lastFrameNanos, int64_t{0}, kMaxDeltaNanos);
+    g_lastFrameNanos = frameTimeNanos;
+    return static_cast<float>(delta) / 1e9f;
+}
 
 void Heartbeat(int64_t frameTimeNanos) {
     ++g_framesSinceReport;
@@ -87,31 +114,14 @@ void SubmitBarrier(VkCommandBuffer commandBuffer, const VkImageMemoryBarrier2& b
     vkCmdPipelineBarrier2(commandBuffer, &dependency);
 }
 
-void RecordClear(VkCommandBuffer commandBuffer, const Swapchain& swapchain, uint32_t imageIndex,
-                 int64_t frameTimeNanos) {
-    VkCommandBufferBeginInfo beginInfo{};
-    beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-    // The pool was created with RESET_COMMAND_BUFFER_BIT, so this resets the
-    // buffer on its own. ONE_TIME_SUBMIT lets the driver skip anything it would
-    // need to keep for a second submission.
-    beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-    vkBeginCommandBuffer(commandBuffer, &beginInfo);
-
-    // UNDEFINED as the old layout throws the previous contents away, which is
-    // exactly right when the whole image is about to be cleared — asking the
-    // driver to preserve pixels that are about to be overwritten costs real
-    // bandwidth on a tiler.
-    VkImageMemoryBarrier2 toAttachment =
-            ColorBarrier(swapchain.image(imageIndex), VK_IMAGE_LAYOUT_UNDEFINED,
-                         VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
-    // Both sides sit at COLOR_ATTACHMENT_OUTPUT, matching the stage the acquire
-    // semaphore is waited on, so the transition cannot run ahead of it.
-    toAttachment.srcStageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
-    toAttachment.srcAccessMask = 0;
-    toAttachment.dstStageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
-    toAttachment.dstAccessMask = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT;
-    SubmitBarrier(commandBuffer, toAttachment);
-
+/**
+ * The placeholder content, for when no world has been installed. Kept because a
+ * static colour cannot be told apart from a frame loop that died three seconds
+ * ago, and because it proves acquire/submit/present work before there is
+ * anything to draw.
+ * */
+void RecordEmptyClear(VkCommandBuffer commandBuffer, const Swapchain& swapchain,
+                      uint32_t imageIndex, int64_t frameTimeNanos) {
     VkRenderingAttachmentInfo colorAttachment{};
     colorAttachment.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
     colorAttachment.imageView = swapchain.imageView(imageIndex);
@@ -131,6 +141,59 @@ void RecordClear(VkCommandBuffer commandBuffer, const Swapchain& swapchain, uint
     // clear is the loadOp, so an empty pair of calls is a full screen clear.
     vkCmdBeginRendering(commandBuffer, &rendering);
     vkCmdEndRendering(commandBuffer);
+}
+
+/**
+ * Wraps whatever draws in the two things the frame loop owns and a world must
+ * not: the command buffer's lifetime, and the layout the presented image has to
+ * be in on the way in and on the way out.
+ *
+ * The split is deliberate. Acquiring, transitioning and presenting are the same
+ * for every world that will ever exist; which passes run, in what order, into
+ * what targets, is different for every one of them. So this function knows
+ * nothing about passes and World::Render knows nothing about the swapchain's
+ * layout.
+ * */
+void RecordFrame(VkCommandBuffer commandBuffer, const Swapchain& swapchain, uint32_t imageIndex,
+                 uint32_t frameIndex, World* world, int64_t frameTimeNanos) {
+    VkCommandBufferBeginInfo beginInfo{};
+    beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    // The pool was created with RESET_COMMAND_BUFFER_BIT, so this resets the
+    // buffer on its own. ONE_TIME_SUBMIT lets the driver skip anything it would
+    // need to keep for a second submission.
+    beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    vkBeginCommandBuffer(commandBuffer, &beginInfo);
+
+    // UNDEFINED as the old layout throws the previous contents away, and on a
+    // tiler that is not a small thing: preserving pixels means reading the whole
+    // image back into tile memory before drawing over it.
+    //
+    // It is only correct because whatever runs below covers every pixel — the
+    // placeholder is a full screen clear, and a world's final pass is a full
+    // screen quad. A world that ever wants to composite ONTO the previous
+    // frame's image would need this to become PRESENT_SRC_KHR, and would need
+    // the swapchain's image count to be part of its reasoning.
+    VkImageMemoryBarrier2 toAttachment =
+            ColorBarrier(swapchain.image(imageIndex), VK_IMAGE_LAYOUT_UNDEFINED,
+                         VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+    // Both sides sit at COLOR_ATTACHMENT_OUTPUT, matching the stage the acquire
+    // semaphore is waited on, so the transition cannot run ahead of it.
+    toAttachment.srcStageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
+    toAttachment.srcAccessMask = 0;
+    toAttachment.dstStageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
+    toAttachment.dstAccessMask = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT;
+    SubmitBarrier(commandBuffer, toAttachment);
+
+    if (world != nullptr) {
+        FrameContext frame;
+        frame.commandBuffer = commandBuffer;
+        frame.frameIndex = frameIndex;
+        frame.swapchain = &swapchain;
+        frame.imageIndex = imageIndex;
+        world->Render(frame);
+    } else {
+        RecordEmptyClear(commandBuffer, swapchain, imageIndex, frameTimeNanos);
+    }
 
     VkImageMemoryBarrier2 toPresent =
             ColorBarrier(swapchain.image(imageIndex), VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
@@ -168,6 +231,18 @@ void DrawFrame(int64_t frameTimeNanos) {
 
     Heartbeat(frameTimeNanos);
 
+    // Simulation before recording, and outside the acquire: the world touches no
+    // Vulkan object here, it only moves nodes and closes their matrices. Nothing
+    // it does needs to wait on an image.
+    World* world = device.world();
+    if (world != nullptr) {
+        world->Update(DeltaSeconds(frameTimeNanos));
+    } else {
+        // Keep the clock advancing anyway, so the first delta after a world is
+        // installed is one frame and not the whole time the app has been up.
+        (void)DeltaSeconds(frameTimeNanos);
+    }
+
     const Swapchain& swapchain = device.swapchain();
     FrameRing& frames = device.frames();
 
@@ -204,7 +279,7 @@ void DrawFrame(int64_t frameTimeNanos) {
         device.InvalidateSwapchain();
     }
 
-    RecordClear(slot.commandBuffer, swapchain, imageIndex, frameTimeNanos);
+    RecordFrame(slot.commandBuffer, swapchain, imageIndex, slot.index, world, frameTimeNanos);
 
     VkCommandBufferSubmitInfo commandBufferInfo{};
     commandBufferInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO;
@@ -273,6 +348,10 @@ void DrawFrame(int64_t frameTimeNanos) {
 void ResetFrameStats() {
     g_reportStartNanos = 0;
     g_framesSinceReport = 0;
+    // Also the delta clock. Without this the first frame of the next surface
+    // measures across however long the app spent in background, and the clamp
+    // in DeltaSeconds would be doing the work a reset should have done.
+    g_lastFrameNanos = 0;
 }
 
 } // namespace putorana::graphics
