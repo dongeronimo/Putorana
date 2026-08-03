@@ -8,8 +8,10 @@ I like to name my vulkan projects with volcanos or flood basalts. Putorana is th
 To reconstruct the real world into the virtual world so that I can use this data to do useful things. The sample will be a simple ship game where the obstacles will be shoals and islands.
 
 - Technologies
-  - OpenChisel: cpu-based space reconstructor.
+  - ARCore: tracking, camera feed and the depth maps the reconstruction is built from.
   - Vulkan 1.3: more modern version of vulkan API to do rendering.
+  - The space reconstructor is written here, on the CPU, with OpenChisel as a reference rather than a dependency. Why, and the mathematics it rests on: ```app/src/main/cpp/putorana/recon/README.md```.
+  - ARCore 1.54, through its C API: tracking, the camera image, and the projection that matches the sensor that took it.
 
 ---
 # Code Convention
@@ -28,26 +30,35 @@ To reconstruct the real world into the virtual world so that I can use this data
 - **The library must not pick up a "d" suffix.** assimp's CMakeLists does ```SET(CMAKE_DEBUG_POSTFIX "d" CACHE STRING ...)```, and ```FetchContent_MakeAvailable``` runs it in this project's scope BEFORE our ```add_library```. A target reads its ```<CONFIG>_POSTFIX``` from the matching ```CMAKE_``` variable at creation time, so ours silently became ```libarreconstructord.so``` while ```System.loadLibrary("arreconstructor")``` kept asking for the name without it — an ```UnsatisfiedLinkError``` on the first line of MainActivity, naming a library that is right there in the APK. ```set_target_properties(... DEBUG_POSTFIX "")``` fixes it on our target only, leaving assimp its own convention.
 - Debug builds ask for ```VK_LAYER_KHRONOS_validation```, which is not part of Android: it has to be present in ```app/src/debug/jniLibs/arm64-v8a/```. Without it the app runs, silently unvalidated.
 - ```arm64-v8a``` only. AR does not run on the emulator, so there is no reason to build x86.
+- **ARCore arrives in two halves from two places, and only one of them is on Maven.** The library ```libarcore_sdk_c.so``` ships inside the AAR ```com.google.ar:core```; the HEADER is not in that AAR at all and exists only in the ```google-ar/arcore-android-sdk``` repo, tagged per release. So ```arcore_c_api.h``` is vendored in ```app/src/main/cpp/third_party/arcore/include/``` — see the README next to it for the upgrade procedure.
+- **CMake downloads and unzips the AAR itself, at configure time**, alongside the ```FetchContent``` that already pulls assimp, and points an ```IMPORTED``` target at the ```.so``` inside. It has to: AGP packages an AAR's ```jni/``` payload into the APK but never exposes the path to the native build, so there is nothing for ```IMPORTED_LOCATION``` to point at otherwise. The obvious alternative — a Gradle ```Copy``` task, which is what the SDK's own samples do — forces configuration-time resolution on every build and still leaves the file missing during an Android Studio sync, because sync runs the CMake configure outside the task graph. **A first configure therefore needs network.**
+- The ARCore version lives in ONE place, ```gradle/libs.versions.toml```. It feeds both ```implementation(libs.arcore)``` and the ```-DARCORE_VERSION``` handed to CMake, so the ```.so``` linked against and the ```.so``` packaged cannot drift. The vendored header is the one thing nothing in the build checks, and a mismatch links cleanly and then fails at runtime on a missing symbol or a struct whose layout moved — so bumping the version means editing the catalog AND re-fetching the header at the matching tag.
+- The header is covered by the ARCore Additional Terms of Service, not by this project's license.
 
 ---
 
 # Graphics Architecture
 - Lifecycles:
   - Instance + debug messager: created once when lib loads
+  - **AR session (```ar::Subsystem```): created once the CAMERA permission is granted, paused/resumed with the ACTIVITY, destroyed only with the process.** Deliberately NOT with the device — destroying an ArSession throws away tracking and every anchor with it, and the device dies on every trip through Home.
   - Surface + Physical Device + Device: created during Surface Created
   - Swapchain: created/recreated during Surface Changed
   - Frame ring (command buffers, acquire semaphores, timeline): created with the Device, untouched by resize
-  - Allocator (VMA) + descriptor pool: created with the Device, destroyed with it
-  - World (scene tree, assets, render passes): owned by the Device, released FIRST in its teardown
+  - Allocator (VMA) + descriptor pool + GPU profiler (its query pools): created with the Device, destroyed with it
+  - World (scene tree, assets, render passes, the camera feed's textures): owned by the Device, released FIRST in its teardown
   - Buffers, images, meshes, pipelines, descriptor sets: nested inside the Allocator's and the pool's lives, so they die every time the app goes to background. **Nothing may be loaded once and cached across surfaces**, and nothing may be cached in a ```static``` — a static pipeline cache would outlive the device that made it and hand out handles into a dead driver.
+
+- **Those two lifetimes only ever meet inside a frame**, and that is the AR design in one line. The session outlives the renderer, so nothing it produces may be kept: the camera image and the pose are borrowed under lock, consumed by whoever asked for them in that same frame, and let go. Which is what makes a device teardown a non-event for tracking, and a Pause a non-event for the renderer.
 
 - One frame, end to end (```DrawFrame``` in Frame.cpp):
   1. rebuild the swapchain if a resize or rotation invalidated it; on the first frame that has one, build the World;
-  2. ```World::Update(dt)``` — moves nodes, then closes every world matrix top-down. Touches no Vulkan, so it runs before the acquire and has nothing to wait for;
-  3. ```FrameRing::BeginFrame``` blocks until the slot being reused has retired, then ```vkAcquireNextImageKHR```;
-  4. barrier the acquired image into ```COLOR_ATTACHMENT_OPTIMAL```, hand it to ```World::Render```, barrier it into ```PRESENT_SRC_KHR```. The frame loop knows about no render pass;
-  5. inside the world: ```MeshPass``` collects, sorts, uploads and draws into its own targets; ```FinalPass``` composites those onto the acquired image;
-  6. ```vkQueueSubmit2``` signals the present semaphore and the timeline value together, then present.
+  2. ```ar::Subsystem::Update``` — the session's tick. FIRST, because it BLOCKS (up to ARCore's built-in 66ms) waiting for the next camera image, so doing it later would sleep while holding a swapchain image and a frame slot. It is also the thing the rest of the frame is about;
+  3. ```World::Update(dt)``` — reads this frame's AR pose onto the camera node, moves nodes, then closes every world matrix top-down. Touches no Vulkan, so it runs before the acquire and has nothing to wait for;
+  4. ```FrameRing::BeginFrame``` blocks until the slot being reused has retired, then ```vkAcquireNextImageKHR```;
+  5. ```GpuProfiler::BeginFrame``` is the first thing recorded into the command buffer — it records the query pool reset, which must precede every timestamp written into it — then a ```GpuScope``` around the whole frame;
+  6. barrier the acquired image into ```COLOR_ATTACHMENT_OPTIMAL```, hand it to ```World::Render```, barrier it into ```PRESENT_SRC_KHR```. The frame loop knows about no render pass;
+  7. inside the world: ```CameraFeed``` uploads the camera image (outside any rendering scope — it records copies and barriers); ```MeshPass``` collects, sorts, uploads and draws into its own targets, clearing to TRANSPARENT black when there is a feed; ```FinalPass``` converts the feed's YUV planes to RGB and mixes the mesh target over them by its alpha, onto the acquired image;
+  8. ```vkQueueSubmit2``` signals the present semaphore and the timeline value together, then present.
 
 # Pieces
 
@@ -75,7 +86,8 @@ To reconstruct the real world into the virtual world so that I can use this data
 ---
 
 ### Device (cpp, putorana::graphics::Device)
-- Owns everything whose life follows the Android surface: the ```ANativeWindow```, the ```VkSurfaceKHR``` built on it, the selected adapter and the ```VkDevice```. Hanging off that: the swapchain, the frame ring, the VMA allocator, the descriptor pool, and the World.
+- Owns everything whose life follows the Android surface: the ```ANativeWindow```, the ```VkSurfaceKHR``` built on it, the selected adapter and the ```VkDevice```. Hanging off that: the swapchain, the frame ring, the VMA allocator, the descriptor pool, the GPU profiler, and the World.
+- The AR session is NOT in that list and must never be. It belongs to the activity, not to this — see ```ar::Subsystem```. Everything below the surface is rebuilt on every return from background; tracking is not.
 - It owns the World for one reason, and it is not tidiness. A world's meshes are allocations from the allocator two lines up, so the world MUST be gone before that allocator is, on a teardown path that runs every time the app is backgrounded. Owned anywhere else that is a rule somebody has to remember; owned here it is what the destructor does. ```Device.h``` only forward-declares ```World```, so the layering stays one way.
 - Created in ```OnSurfaceCreated``` and destroyed in ```OnSurfaceDestroyed```. That cycle runs many times over one library load. Pressing Home destroys it and coming back builds a new one, all inside the same Activity instance, so nothing that depends on the device can be cached on the Activity.
 - All or nothing. If any step fails, the window is released and the object is left empty, so ```HasSurface()``` is the only thing callers need to check.
@@ -136,6 +148,41 @@ To reconstruct the real world into the virtual world so that I can use this data
 
 ---
 
+## AR
+*Where the real world comes in. One namespace that knows ARCore and not Vulkan, one class that knows Vulkan and not ARCore, and the line between them.*
+
+### Subsystem (cpp, putorana::ar::Subsystem)
+- ARCore, and nothing else. **Nothing in ```putorana::ar``` includes volk.h and nothing in it may.** What it produces is plain memory and plain numbers; turning those into VkImages is ```CameraFeed```'s job, on the other side of that line. The rule is structural rather than a matter of discipline — a ```VkImage``` member would not compile — so it cannot quietly rot, and it is what keeps the upload-vs-import decision below a change to one file.
+- **Its lifetime is the ACTIVITY's, not the surface's**, and that is the whole reason it is a separate object with a separate holder and a separate Kotlin entry point. A Device dies every time the app is backgrounded and takes the World with it; destroying an ArSession throws away tracking, and with it every anchor and everything reconstructed so far. So it sits at the same level as the ```VkInstance```: created once, paused and resumed with the activity, destroyed with the process.
+- ```subsystem_holder``` is deliberately NOT ```device_holder```'s shape. That one constructs on first use, which is right for something with no failure mode. Creating a session fails for half a dozen reasons the user needs to be told about — no ARCore APK, an APK too old, an unsupported device, a permission that was never granted — so it is created explicitly and ```Get()``` may answer null forever after. Every caller already handles that, because "no AR" still has to draw something.
+- Two threads touch it: Create/Resume/Pause from the UI thread on the activity's lifecycle, Update from the render thread once a frame. ARCore's session is not thread-safe across those, so every entry point takes one mutex. It is uncontended in the steady state; the overlap it exists for is the user pressing Home while a frame is in flight.
+- ```AcquireFrame``` hands back a GUARD holding that lock, not a copy of the frame, and that is not over-engineering. ```CameraFrame``` carries pointers into an ```ArImage``` this object owns, and Pause releases it — from the UI thread, at any moment. onPause runs well before the surface is destroyed, so the render thread really is still copying when that happens. The cost is that Pause waits for a memcpy of about half a megabyte; the benefit is that it cannot happen underneath one.
+- ```AR_TEXTURE_UPDATE_MODE_EXPOSE_HARDWARE_BUFFER``` is set for a reason that is not the hardware buffer — nothing here reads one. The DEFAULT mode expects a ```GL_TEXTURE_EXTERNAL_OES``` name handed over by ```ArSession_setCameraTextureName```, and this process has no GL context at all to make one in. Selecting the hardware-buffer mode makes those texture names ignored by the header's own wording, which is exactly the opt-out wanted: the image is then consumed purely on the CPU through ```ArFrame_acquireCameraImage```.
+- ```AR_UPDATE_MODE_BLOCKING```, the default, and wanted: it paces the renderer to the camera, which is the rate at which anything on screen can actually change. The wait is capped by ARCore's own 66ms, so it cannot wedge the loop — and it is why the tick belongs beside the world's update rather than inside a render pass.
+- **Strides are not widths.** ```yRowStride``` and ```uvRowStride``` are whatever padding the driver chose, both ```>=``` width. One ```width * height``` memcpy is the bug those fields exist to prevent; rows are copied one at a time whenever the stride disagrees.
+- YUV_420_888 nominally has three planes, but on Android U and V are almost always two interleaved views of ONE block, two bytes apart. That block goes up verbatim as a two-channel texture. **Which byte is which is detected, not assumed**: NV12 puts U first, NV21 puts V, both occur in the wild, and guessing wrong swaps the reds and blues — which reads as a colour-space bug and sends you looking in the wrong file.
+- ```viewToImage``` is an affine BASIS — the images of (0,0), (1,0) and (0,1) — rather than three finished texture coordinates, for two reasons. The three points handed to ARCore stay inside the unit square, so nothing depends on how ```ArFrame_transformCoordinates2d``` treats out-of-domain input. And the space it describes is the VIEW's, which is NOT the space a fullscreen triangle is drawn in whenever the swapchain carries a preTransform; composing the two is the renderer's business, and this namespace does not know Vulkan exists.
+- ```SetDisplayGeometry``` takes the DISPLAY rotation (```Surface.ROTATION_*```), a related but different quantity from the swapchain's ```preTransform```. Everything ARCore answers in view coordinates, the UV basis included, is wrong until it has been told the truth.
+- The projection is TAKEN, never computed. It comes from the physical sensor's intrinsics and the display geometry ARCore was told about; a hand-built frustum that is close but not equal does not look like a wrong field of view, it looks like objects sliding against the world whenever the phone moves.
+- The pose is the DISPLAY-ORIENTED one, and only meaningful while ```tracking```. Before the first localisation, and whenever tracking is lost, the numbers are stale rather than wrong-but-close, and moving a camera to them jumps the whole scene.
+- A device that cannot produce CPU images says so ONCE, not sixty times a second, and one set of UVs is logged after each geometry change. A log line per frame is a log with nothing in it.
+- ```arcore_check.cpp``` is the "is the ARCore half of this build wired up at all?" button, in the same spirit as ```vulkan_check.cpp``` and equally unused by the UI. It asks ARCore whether it is available, the one native call needing nothing but a JNIEnv and a Context. Reaching an answer AT ALL — even an unsupported-device answer — proves the vendored header matches the linked ```.so```, that the loader found that ```.so``` in the APK, and that the ARCore APK is reachable over the package manager. A false result is therefore not necessarily a broken build, and the report says which of the two it was.
+
+---
+
+### CameraFeed (cpp, putorana::graphics::CameraFeed)
+- The ARCore image as two Vulkan textures: luma at full resolution, single channel; chroma at half resolution, two channels interleaved. Sampling both with the same UVs gets 4:2:0's chroma upsampling for free out of the hardware's bilinear filter.
+- **Deliberately NOT a pass.** It opens no rendering scope and draws nothing — it makes the bytes samplable and ```FinalPass``` composites them. An earlier version DID own a pass, drawing the feed into the mesh pass's colour target before the geometry; the attachment then had to be stored and loaded back between the two scopes, which on a tiler is a full screen read plus a full screen write, around 16MB a frame at 1080p. Compositing in the pass that was already going to read that attachment costs one texture fetch.
+- **An upload, and not the zero-copy import** ARCore offers. Importing its AHardwareBuffer directly is the faster path and it is not the one taken, because of what it drags in: an *external format* known only at runtime, which forces a ```VkSamplerYcbcrConversion```, which must be an immutable sampler baked into a descriptor set layout, which means the pipeline sampling it cannot exist until the first camera frame has arrived. It is also opaque to a graphics debugger, and being able to look at these two textures in RenderDoc is worth more right now than the copy costs.
+- That copy is smaller than it sounds: ARCore's CPU image is not the full sensor, commonly 640x480, so about 460KB at 1.5 bytes per pixel — and no colour conversion happens on the CPU at all. The planes go up as they are and the fragment shader does the matrix. **Changing this decision touches this file and nothing else**, which is the entire reason the subsystem does not speak Vulkan.
+- Staging buffers are one per frame in flight, for the same reason a Mutable mesh holds one region per slot: the CPU writes while the GPU may still be reading the previous frame's copy.
+- ```Upload``` MUST be called outside any rendering scope. It records buffer-to-image copies and image barriers, neither of which is legal between ```vkCmdBeginRendering``` and ```vkCmdEndRendering```.
+- A null frame is the ordinary case for the first frames after a resume, and for any frame the camera did not produce an image for. The textures keep what they last held: a repeated frame is far less noticeable than a flash of the clear colour.
+- The texture coordinates are COMPOSED here, from two mappings the corners have to survive: swapchain space to view space (the preTransform), then view space to image space (ARCore's basis). Doing the extrapolation to the triangle's off-screen corners on this side makes it exact by construction. **In portrait the preTransform is identity and that first step is the identity function, which is exactly why a bug in it shows up only after the first rotation.**
+- ```ArCamera::ProjectionMatrix``` applies the same rotation, in the same direction. Those two have to agree, or the cube and the camera image rotate away from each other.
+
+---
+
 ## GPU resources
 *The things memory is spent on. All of them die with the Allocator, which dies with the Device.*
 
@@ -178,6 +225,8 @@ To reconstruct the real world into the virtual world so that I can use this data
 
 ### Node (cpp, putorana::graphics::Node)
 - A transform in a hierarchy plus whatever optional components hang off it. A node by itself is a position, a scale and an attitude; what it IS comes from what is attached. Renderable present means it is drawn, camera present means it is a camera, light present means it is a light. A node carrying none is a pure pivot, which is not a degenerate case but the most common one — every parent is one.
+- Two storage strategies, and the split is not taste. ```renderable``` is an ```optional```: concrete, final, small, held inline with no allocation. ```camera``` and ```light``` are ```unique_ptr``` because both are polymorphic bases — the object is really a PerspectiveCamera or an ArCamera, a PointLight or a SpotLight — and ```optional<Base>``` stores a Base by value, slicing ARCore's whole projection off one and a spot's cone angles off the other. Neither would even compile: both constructors are protected precisely so a bare base cannot exist.
+- That an ArCamera writes ARCore's pose into this node's transform, rather than keeping a view matrix of its own, is what keeps exactly one answer in the tree to "where is the camera".
 - **Rotation is a quaternion inside and unbounded Euler degrees outside.** The quaternion is the source of truth: it feeds the matrices and any future interpolation. The Euler angles are an editable VIEW of it, with Unity's semantics.
 - Setting ```eulerAngles``` stores the numbers verbatim, unclamped. Set (500, -720.5, 1234) and read back (500, -720.5, 1234) — that is what lets an animation drive an angle continuously through 360 without the value jumping. Setting the quaternion directly makes those raw numbers meaningless, since a quaternion cannot say whether it got there by turning 30 degrees or 390, so the cache is flagged stale and the next read derives canonical angles instead (x in [-90,90], y and z in [-180,180]).
 - The Euler convention is degrees, applied Z then X then Y about WORLD axes, so R = Ry * Rx * Rz. Written out as three explicit ```angleAxis``` products rather than through a library helper, because every library spells the order differently and half of them mean intrinsic axes by it. Verified numerically against Ry*Rx*Rz over 20000 random angles (worst element error 1.2e-15) and for round-trip through the canonical extraction.
@@ -210,13 +259,39 @@ To reconstruct the real world into the virtual world so that I can use this data
 ---
 
 ### Camera (cpp, putorana::graphics::Camera)
-- The projection half of a camera, hanging off a Node like a Renderable does. The VIEW is not here: it is the inverse of the owning node's world matrix, because the camera looks down its node's -Z. That is what lets a camera be parented to a ship and follow it with no code.
+- What a node needs to be a camera: a way to produce a projection matrix. Nothing else is in the base.
+- **Abstract, because there are two genuinely different sources for a projection.** A ```PerspectiveCamera``` computes it from a field of view and an aspect ratio, the way every renderer does. An ```ArCamera``` does not compute it at all — it is handed one built from the physical sensor's intrinsics. Inventing a projection instead would put the virtual geometry in a subtly different frustum from the camera image behind it, and that mismatch is not visible as a wrong FOV: it is visible as objects that refuse to stay stuck to the world.
+- The VIEW matrix is not here, and never was. It is the inverse of the owning node's world matrix, because a camera looks down its own -Z — the same convention as Light's direction and as glTF's. Keeping it out of this class is what lets a camera be parented to a ship and follow it with no code, and it is also **what lets an ArCamera work with no special case anywhere**: the AR pose is written INTO the node, so the inverse of that node's world matrix already IS ARCore's view matrix.
+- A Node holds this by ```unique_ptr``` and not by ```optional```. Polymorphism means a pointer: ```optional<Camera>``` stores a Camera by value and would slice ARCore's whole projection off. Same reasoning as Light, and the same shape.
+- ```SurfaceRotation(transform)``` is a free function in this header, and **every projection in the renderer is multiplied by it from the LEFT**, because it acts on clip space, after everything else. The swapchain is created with the surface's ```currentTransform``` (see Swapchain), which is a promise to the presentation engine that the content arrives already rotated — that saves the compositor a full screen blit on every frame, and the price is that keeping the promise is the renderer's job.
+- ```CameraFeed``` applies the same rotation to its texture coordinates, for the same reason and in the same direction. Those two have to agree or the virtual content and the camera image end up rotated relative to each other.
+- The four matrices are built by hand from exact integers rather than with ```glm::rotate```, because ```cos(pi/2)``` in floating point is -4.4e-8 and not zero. These are permutations of the axes and deserve to be exactly that; a projection that is a hair off square is a needle in a haystack later. Only the four rotations are handled — the mirrored transforms exist in the spec but no Android compositor reports one, and identity is the honest answer to INHERIT.
+
+---
+
+### PerspectiveCamera (cpp, putorana::graphics::PerspectiveCamera)
+- The ordinary kind: computes its own projection from a field of view and the framebuffer's aspect ratio. What a non-AR scene uses, and what this world falls back to on a device with no AR session.
 - Not a 29-line class like the WebGPU original it is ported from, because three transforms sit between a right-handed world and an Android screen and none of them are optional.
 - ```perspectiveRH_ZO``` and not ```glm::perspective```. RH is the glTF convention the whole engine uses; ZO is Vulkan's [0,1] clip depth, which is NOT GLM's default — GLM ships OpenGL's [-1,1] and only switches globally with ```GLM_FORCE_DEPTH_ZERO_TO_ONE```. A global that halves everyone's depth precision if someone drops it is worse than naming the variant at the one call site.
 - ```projection[1][1] *= -1``` because Vulkan's NDC +Y points DOWN, unlike OpenGL and WebGPU. Skipping it renders the scene upside down and, worse, reverses triangle winding so back-face culling quietly removes the faces it should keep.
-- Pre-rotation is applied here, from the left: ```rotate * proj * view * model```. It goes AFTER the Y flip so the rotation happens in y-down clip space, where a positive angle reads clockwise on screen — which is what ```ROTATE_90``` means in the spec. The four rotation matrices are built from exact integers rather than ```glm::rotate```, because ```cos(pi/2)``` in floating point is -4.4e-8 and these are meant to be exact axis permutations.
+- Pre-rotation is applied from the left: ```SurfaceRotation * proj * view * model```. It goes AFTER the Y flip so the rotation happens in y-down clip space, where a positive angle reads clockwise on screen — which is what ```ROTATE_90``` means in the spec.
 - There is no ```aspect``` field. It is derived from the extent inside ```ProjectionMatrix```, because under a 90 or 270 degree rotation the width and height the camera should reason about are SWAPPED relative to the swapchain's — and a settable field is an invitation to compute it from ```extent.width/extent.height``` somewhere else and get exactly that wrong. Getting it wrong looks like a bad FOV, not like a rotation bug.
+- ```fovY``` is in DEGREES, because it is a number a human types — the same reason the node's Euler angles are. (Spotlight cone angles are radians because those are read verbatim out of a glTF.)
 - ```nearPlane```/```farPlane``` and not ```near```/```far```, which are macros in ```<windef.h>```. Depth precision lives in the RATIO far/near: pushing near from 0.1 to 0.5 buys more than pulling far from 1000 to 200.
+
+---
+
+### ArCamera (cpp, putorana::graphics::ArCamera)
+- A camera whose projection comes from ARCore rather than from a field of view. **The matrix is taken, not computed**: it has to match the physical sensor that took the picture behind it — its focal length, its principal point, the crop ARCore applied to fit the viewport — and reproducing that from a fovY means agreeing with ARCore's own arithmetic to the last decimal. Where it disagrees, virtual objects do not look mis-framed; they look like they are sliding over the world, and only while the phone moves.
+- **```SetFrame``` writes the pose onto the owning NODE, not into this class.** Two things fall out of that, both wanted: the view matrix needs no special case, since MeshPass already builds it as the inverse of the camera node's world matrix and ARCore's view matrix is by definition the inverse of the pose just written there; and the scene graph tells the truth, so anything that wants to know where the device is — or gets parented to it later — reads the node like any other.
+- Call it from the world's Update, BEFORE ```World::Update``` closes the world matrices. After, and the camera's transform lands a frame late and every virtual object lags the picture by one frame.
+- A frame whose tracking state is not TRACKING is ignored for the pose — it is stale rather than approximately right — but its projection is still taken, because that depends on the display geometry rather than on tracking.
+- ARCore's C API is OpenGL-shaped throughout: +Y up, clip Z in [-1,1], column major. Both conversions happen here, once per frame, rather than being left for a shader to guess at. Column-major floats go straight into a ```glm::mat4```: same memory order, so it is a copy and not a transpose.
+- Clip Z from [-1,1] to [0,1] is ```z' = (z + w) / 2```, written as a row operation over every column because that is literally all it is. Skipping it does not black the screen — it halves the usable depth range and quietly clips everything in front of the midpoint, which reads as geometry disappearing when it gets close.
+- The Y flip negates the **whole row 1, not just ```[1][1]```**. ARCore's projection carries a principal point offset, so unlike a textbook perspective matrix it has terms off the diagonal, and negating only the diagonal one leaves the image off-centre by however far the sensor's optical axis is from the middle.
+- ARCore's quaternion order is qx, qy, qz, qw; ```glm::quat```'s constructor takes w FIRST. Getting this wrong produces a rotation that looks plausible and is wrong in a way no still frame reveals.
+- ```ProjectionMatrix``` does no aspect ratio arithmetic at all, and that is the point: ARCore was told the viewport's shape through ```ArSession_setDisplayGeometry``` and built the matrix for it, so recomputing an aspect here would be a second opinion — and two opinions about one frustum is exactly how the content stops matching the picture. The pre-rotation is still applied, for the reason in Camera.
+- ```nearPlane```/```farPlane``` are in METRES, and really are: this is the one camera in the engine whose scene has a physical scale. They must be pushed to ```ar::Subsystem::SetClipPlanes``` — ARCore builds the projection, so setting them here alone does nothing at all.
 
 ---
 
@@ -251,12 +326,16 @@ To reconstruct the real world into the virtual world so that I can use this data
 ---
 
 ### HelloWorld (cpp, putorana::graphics::HelloWorld)
-- The first world: the cube from ```unitary_cube.glb``` under ROOT, spinning, and a second node carrying the camera at (2,3,5) aimed at the origin.
-- It exists to exercise the whole chain at once — asset read, glTF parse, mesh upload, node graph, material, pipeline cache, instanced draw, composite — with the smallest content that can show any of it is wrong. A cube is unforgiving on purpose: wrong winding hides the faces you should see and shows the ones you should not, wrong depth order draws the far faces over the near ones, and wrong normals flatten it into a hexagon.
+- The first world: the cube from ```unitary_cube.glb``` under ROOT, spinning, and a second node carrying the camera — over the live camera feed when there is an AR session.
+- It exists to exercise the whole chain at once — asset read, glTF parse, mesh upload, node graph, material, pipeline cache, instanced draw, camera upload, composite — with the smallest content that can show any of it is wrong. A cube is unforgiving on purpose: wrong winding hides the faces you should see and shows the ones you should not, wrong depth order draws the far faces over the near ones, and wrong normals flatten it into a hexagon. Over a camera feed it also stops being a picture and starts being a measurement: geometry that slides when the phone moves is a projection or a pose bug, and nothing else looks like that.
+- **Which KIND of camera is the one decision this world makes about AR.** With a session, ARCore owns both the projection and the pose and the node's transform becomes an OUTPUT. Without one — no ARCore, no permission, an unsupported device — it is a ```PerspectiveCamera``` at (2,3,5) aimed at the origin, exactly as it was before, so the cube is still visible on a device that cannot do AR at all.
+- In the AR branch the cube is moved to (0,0,-2). ARCore's world origin is wherever the device was when the session started, so a cube left at the origin is a cube the camera is standing INSIDE — clipped away by the near plane, and indistinguishable from a projection that does not work. Two metres down -Z puts it in front of where the user was looking, at the size a one-metre cube should be. Units are metres, and really are.
+- The camera feed's failure is NOT the world's. It is logged and swallowed in ```CreateRenderPasses```, because no camera means no background and a cube on a blue field is still a perfectly good picture — the same state as the first frames after every resume, while the camera stack comes up.
+- ```Render``` uploads the feed first, outside any rendering scope, then runs the mesh pass with a transparent clear only when the feed actually has content, then the final pass. Both the upload and ```ArCamera::SetFrame``` hold the subsystem's lock through a ```FrameGuard```, because Pause arrives on the UI thread and can free the ArImage mid-copy.
 - The camera is a SIBLING of the cube, not a child, so spinning the cube does not spin the camera with it.
 - ```LookAt``` in ```CreateWorld``` works because it uses ```ComputeWorldMatrix```, which walks the parent chain rather than trusting the cache — and the cache is empty there, since no frame has run.
 - The spin accumulates degrees and never wraps, which is exactly what the unbounded Euler interface is for: the angle climbs past 360 and the quaternion it drives stays well behaved.
-- ```Update``` calls the base LAST. The base is what closes every world matrix, so anything moved after it would land a frame late. This is the seam behaviours will replace.
+- ```Update``` calls the base LAST, and takes the AR frame FIRST. The base is what closes every world matrix, so anything moved after it would land a frame late; the AR pose is what everything else this frame is measured against. This is the seam behaviours will replace.
 - ```Frame.cpp``` is the only place that names a concrete world; everything else in the namespace knows the World interface. It builds the world on the first frame with a swapchain — not in ```OnSurfaceCreated``` — because pipelines are built for the surface's colour format, and it latches a flag so a world that fails to build is not retried sixty times a second.
 
 ---
@@ -293,6 +372,7 @@ To reconstruct the real world into the virtual world so that I can use this data
 - Sets 0 and 1 are rebound on every PIPELINE change rather than once before the loop. Binding once would only be legal while every material's pipeline layout stays compatible for those sets — true today, and the kind of invariant that breaks silently the day a material adds a push constant. The cost is one call per distinct pipeline, a handful per frame after the sort.
 - Set 2 is rebound after a pipeline change even when the material did not change, because binding a layout disturbs the higher-numbered sets.
 - Set numbering is by UPDATE FREQUENCY, which is the only thing it is good for: frame, then object, then material. Vulkan disturbs the sets numbered ABOVE one whose layout changed, so the most volatile goes last and a material switch cannot invalidate the camera.
+- ```transparentClear``` clears the colour target to ZERO ALPHA instead of an opaque colour, which is the whole handshake with the camera background: alpha is then 0 wherever no geometry was drawn, and the final pass's mix shows the feed there. Pass false — the default — when there is no feed, and the opaque clear carries straight through that same mix unchanged. No branch anywhere, and one code path whether or not there is AR.
 - One colour target, not one per frame in flight, and the barrier is what makes that safe. A pipeline barrier's first synchronization scope covers everything earlier in SUBMISSION order, and submission order spans queue submits — so naming ```FRAGMENT_SHADER``` as the source stage is what stops this frame from overwriting an image the previous frame's final pass is still sampling.
 - Depth is cleared and stored ```DONT_CARE```. On a tiler that is the difference between writing a full screen of depth out to RAM and never leaving tile memory with it.
 - Growing the object buffer and rebuilding the targets both ```vkDeviceWaitIdle``` first. Rewriting a descriptor set the GPU may be reading is undefined; both events are rare (a doubling, a resize) so the blunt wait beats tracking which sets are live.
@@ -302,12 +382,16 @@ To reconstruct the real world into the virtual world so that I can use this data
 ---
 
 ### FinalPass (cpp, putorana::graphics::FinalPass)
-- Puts what the mesh pass drew onto the presented image, with one screen-covering triangle that samples it.
-- The mesh pass could draw straight into the swapchain image and save a full screen write plus a full screen read, which on a phone is real bandwidth — this pass is not free. It is here because everything that has to happen to a FINISHED image happens in it: tone mapping the day the mesh pass draws into a float target, and post effects after that. A geometry pass cannot do those to itself, because they need the whole image while it is still being written.
-- Its own set 0 — one combined image sampler, no camera, no objects, no material. A pass defines its own numbering; the three-set contract in Material.h is about shaders that draw geometry.
+- Puts what the mesh pass drew onto the presented image with one screen-covering triangle that samples it — and, when there is one, puts the camera feed underneath it in the same draw.
+- The mesh pass could draw straight into the swapchain image and save a full screen write plus a full screen read, which on a phone is real bandwidth — this pass is not free. It is here because everything that has to happen to a FINISHED image happens in it: compositing the virtual world onto the real one, tone mapping the day the mesh pass draws into a float target, and post effects after that. A geometry pass cannot do those to itself, because they need the whole image while it is still being written.
+- **The camera feed composites HERE** because this pass was already going to read the mesh pass's attachment, so the background costs one extra texture fetch and nothing else. The alternative — a camera pass drawing into that attachment before the mesh pass — forces it to be stored and loaded back between the two scopes: a full screen read plus an extra full screen write, around 16MB a frame at 1080p, for a result draw order gives away.
+- The compositing is a mix by the mesh target's alpha, in the shader, and not fixed-function blending. Doing it explicitly keeps the colour space explicit, which matters when one input is linear (an ```_SRGB``` texture, decoded on sample) and the other is gamma-encoded camera data.
+- Its own set 0 — three combined image samplers, no camera, no objects, no material. A pass defines its own numbering; the three-set contract in Material.h is about shaders that draw geometry.
+- **A 1x1 placeholder image is bound where the feed is missing.** A descriptor must name a valid view even on frames where nothing samples it in earnest — before the first camera image, and forever on a device with no ARCore. Binding a stand-in is cheaper than a second pipeline, and cheaper than a per-pixel branch to skip a fetch that is already multiplied by zero.
+- The push constant block is declared ONCE, visible to both stages, rather than split into a vertex range and a fragment range. Ranges that overlap in memory but differ in stage flags are legal and are a reliable way to spend an afternoon on a validation error.
 - ```loadOp``` is ```DONT_CARE```, not ```CLEAR```: the triangle covers every pixel, so clearing would write a full screen of colour that is immediately overwritten.
-- The sampler is ```NEAREST``` because this is a 1:1 copy — source and target are both the swapchain extent, so every sample lands exactly on a texel and linear filtering would be four taps computing the same value.
-- The descriptor is only rewritten when the source view changes, which is a resize, and it waits for the GPU first: rewriting a set a frame in flight is reading is undefined.
+- The source sampler is ```NEAREST``` because that is a 1:1 copy — source and target are both the swapchain extent, so every sample lands exactly on a texel and linear filtering would be four taps computing the same value. The FEED's sampler is ```LINEAR```, because that one is a genuine rescale from the sensor's resolution and it upsamples the chroma plane on the way.
+- The descriptors are only rewritten when a view actually changes — a resize, or the first camera image — and it waits for the GPU first: rewriting a set a frame in flight is reading is undefined.
 
 ---
 
@@ -319,6 +403,24 @@ To reconstruct the real world into the virtual world so that I can use this data
 - ```vkQueueSubmit2``` signals the binary present semaphore and the timeline value from one array. Before synchronization2 the timeline values lived in a parallel struct whose arrays had to be kept index aligned by hand.
 - Dynamic rendering, so there is no ```VkRenderPass``` and no ```VkFramebuffer``` anywhere in the project.
 - Drives the world when there is one: ```Update``` before the acquire (it touches no Vulkan, only nodes and matrices, so it has nothing to wait for), then ```Render``` between the two layout barriers. With no world installed it falls back to the slow colour sweep it always had, which is what proves acquire/submit/present work before there is anything to draw.
+- **The AR session's tick happens first of all, before ```BeginFrame``` and before the acquire.** It blocks — up to ARCore's built-in 66ms — waiting for the next camera image, so anywhere later it would sleep while holding a swapchain image and a frame slot. It is also the thing everything else this frame is about: a tick buried inside a render pass would leave whichever pass ran first working from the previous frame's answer, which in AR is visible as geometry sliding against the world.
+- ```GpuProfiler::BeginFrame``` is the first thing recorded into the command buffer, and has to be: it records the query pool reset, which must precede every timestamp written into that pool. The outermost ```GpuScope``` is named ```frame```, so the overlay shows what the passes inside it do NOT account for — barriers, transitions, and whatever the driver does between them.
+- This file is where the two lifetimes meet, and it holds no AR state to make that safe: it asks ```subsystem_holder``` every frame and does nothing when the answer is null.
+
+---
+
+## Instrumentation
+*Measuring what the GPU actually did. Debug facilities, and they die with the device like everything else.*
+
+### GpuProfiler / GpuScope (cpp, putorana::graphics::GpuProfiler)
+- GPU timing for named scopes, by timestamp query. Owned by the Device, so its query pools go away and come back on every trip through Home, and the Kotlin side has to tolerate that.
+- **A clock read around the calls would measure nothing.** Recording a command buffer takes almost no time and says nothing about the work: ```vkCmdDraw``` returns long before the GPU has drawn anything, so a CPU timer around a render pass measures how fast the driver builds a command list. The only way to learn what the GPU spent is to have the GPU write the time itself.
+- **The numbers are always a frame or two old, on purpose.** A timestamp is readable only once the submission carrying it has retired. This keeps one pool per frame in flight and reads a slot's results at the start of the NEXT frame that reuses it — by which point ```FrameRing::BeginFrame``` has already waited on the timeline for exactly that, so the read never blocks. Waiting on the frame that just ended would stall the CPU on the GPU every frame in order to measure the GPU, which is a fine way to make the numbers wrong in the direction of "everything is fast".
+- Scopes NEST: ```Begin```/```End``` form a stack, so one scope around the whole frame contains one per pass. Timestamps are written with ```ALL_COMMANDS``` at both ends — the conservative reading, and it means two adjacent scopes cannot appear to overlap.
+- ```GpuScope``` is the RAII form and the only one worth using: a scope has to be closed on every path out of a render function, and the paths out of a render function are early returns.
+- A device whose queue family reports no timestamp support is NOT a failure. The profiler is created DISABLED and every call becomes a no-op, because refusing to start the renderer there would trade a working app for a debug overlay. ```FrameContext::profiler``` is a raw pointer for the same reason: it may legitimately be absent, and ```GpuScope``` then does nothing rather than crashing.
+- ```Snapshot``` takes a lock — the only thing in the renderer that does — because it is read from the UI thread while the render thread writes the next frame's numbers. The values are exponentially smoothed, and that is not cosmetic: raw per-frame GPU times jump by tens of percent frame to frame, and unsmoothed the overlay is unreadable.
+- The ticks are masked to ```timestampValidBits``` and scaled by ```timestampPeriod```. Bits above the valid count are garbage, not zero.
 
 ---
 
@@ -356,12 +458,51 @@ To reconstruct the real world into the virtual world so that I can use this data
 - ```--target-env=vulkan1.3``` matters: without it glslc targets SPIR-V 1.0 and rejects later constructs while blaming the shader rather than the target.
 - **glslc comes from the NDK version app/build.gradle.kts pins**, ahead of ```ANDROID_NDK_HOME```. That is not the obvious order and it is deliberate: ```ANDROID_NDK_HOME``` is a machine-wide setting that drifts, and on this project's own machine it pointed at an NDK three major versions behind the pinned one. Shaders built by a compiler years apart from the toolchain that builds the renderer is a difference nobody goes looking for. An explicit ```GLSLC``` still wins over everything.
 - ```ShaderModule``` is move-only RAII rather than a load/destroy pair, because a material's ```CreatePipeline``` loads two modules and then has half a dozen early returns before ```vkCreateGraphicsPipelines``` — every one of them would leak. It is short-lived by design: a module is only needed while a pipeline is being built.
-- ```fullscreen.vert``` generates ONE oversized triangle from ```gl_VertexIndex```, not a quad, and not for elegance. A quad is two triangles meeting along the diagonal, and the GPU shades in 2x2 pixel quads, so every quad straddling that seam is shaded twice. A single clipped triangle has no seam.
+- ```fullscreen.vert``` generates ONE oversized triangle from ```gl_VertexIndex```, not a quad, and not for elegance. A quad is two triangles meeting along the diagonal, and the GPU shades in 2x2 pixel quads, so every quad straddling that seam is shaded twice. A single clipped triangle has no seam. Its screen UVs are derived from the index; its CAMERA UVs cannot be, and arrive as push constants — the sensor has a fixed orientation and aspect ratio, neither of which is the viewport's, and ARCore owns the mapping between them.
+- ```composite.frag``` does two jobs in that one triangle, because both need the mesh pass's attachment and splitting them would mean storing it and loading it back: YUV_420_888 to RGB, then the mix of the mesh output over it by alpha.
+- **BT.601, studio swing.** Luma occupies 16..235 and chroma 16..240, which is what a camera pipeline produces; treating it as full range is the classic mistake and shows up as milky blacks and clipped highlights.
+- What comes out of that matrix is GAMMA-ENCODED — display-ready values, the same encoding a JPEG carries — while the mix happens in linear light and an ```_SRGB``` swapchain re-encodes on write. So it is linearised first, with the exact sRGB EOTF rather than ```pow(2.2)```: the piecewise linear segment near black is the part the approximation gets wrong, and dark is where a camera feed spends much of its range indoors. Mixing gamma-encoded values against linear ones looks like a wrong blend factor.
+- Sampling an ```_SRGB``` image decodes to linear in hardware, and alpha is never sRGB-encoded by spec — which is what makes the mesh target's alpha usable directly as the mix factor.
+- Tone mapping, when it comes, goes ABOVE the mix and on the mesh contribution ALONE: that half is scene-referred, the camera feed is already display-referred and must not be touched.
 
 ---
 
 ## The Android side
-*Kotlin. Owns the window and the thread; owns no renderer state.*
+*Kotlin. Owns the window, the thread and the activity lifecycle; owns no renderer state.*
+
+### Manifest (app/src/main/AndroidManifest.xml)
+- **AR Required, not optional**, in two places that have to agree: ```uses-feature android.hardware.camera.ar required="true"``` and the ```com.google.ar.core``` meta-data. There is no mode of operation without tracking, the same way there is no fallback without Vulkan 1.3. Both consequences are wanted here: the Play Store hides the app from devices with no ARCore support, and installs ARCore alongside it. An AR Optional app would declare ```required="false"``` in both and check ```ArCoreApk_checkAvailability``` before touching a session.
+- ```CAMERA``` is a runtime permission and ARCore never prompts for it — it just fails. Asking is the activity's job, and it has to be settled before the session is created.
+- **```HIGH_SAMPLING_RATE_SENSORS``` is the non-obvious one.** ARCore's tracking is visual-inertial: it wants the IMU at 200Hz with a 5ms report delay, and since API 31 sampling motion sensors that fast requires this permission. Without it the sensor registration fails and ```ArSession_resume``` returns ```AR_ERROR_FATAL``` with "Failed to register sensor to queue 0" in logcat — nothing that mentions permissions, and nothing wrong with the camera. It is a normal protection level, so it is granted at install and never requested. The SDK's own samples do not declare it because they do not target 31+.
+- ```screenOrientation="portrait"```. A rotation here is not a relayout: it destroys the Activity, the Surface, the VkDevice, the swapchain and the whole world and rebuilds all of it, with the AR session the only survivor. Not worth paying in an app whose interface is the camera.
+- That lock does NOT make the renderer's rotation handling redundant, which is why it stays: the swapchain's ```preTransform``` can be non-identity even with the orientation fixed, and since API 36 Android ignores the restriction on large screens — on a tablet the app rotates anyway. ```ArCamera``` and ```CameraFeed``` keep composing ```SurfaceRotation```, and that is what keeps it correct there.
+
+---
+
+### MainActivity (java, dev.dongeronimo.arreconstructor::MainActivity)
+- Owns the AR session's lifecycle and nothing else about AR. ```NativeAr.create``` once the permission is settled, ```resume``` from onResume, ```pause``` from onPause — before ```super```, so the camera is released on the way out rather than after the framework has begun tearing the window down.
+- **The permission dialog breaks the usual ordering**, which is what ```activityResumed``` exists for: the grant can land long after onResume has run, so the code that starts the camera cannot assume it is the one being resumed. Without that flag, granting the permission on first launch produces a session nobody ever resumes.
+- A denied permission is not a crash. The overlay says so and the renderer keeps drawing the cube on its clear colour, which is a good deal more informative than a black screen.
+- The GPU timings are POLLED, four times a second, and not pushed. A callback per frame would cross the JNI boundary thirty times a second to update a label nobody can read that fast, and would have to hop to the UI thread each time. Four times a second is faster than the smoothing settles anyway. The polling stops in onPause BEFORE anything else, because the device the numbers come from is about to be torn down.
+- ```goFullscreen``` does two separate things and doing only one is the usual mistake. ```setDecorFitsSystemWindows(false)``` stops the decor view shrinking the content to fit the bars — without it the SurfaceView is built for a shorter rectangle than the screen, and the swapchain follows. Hiding the bars is what gets them off the pixels. Sticky immersive, so an edge swipe brings them back as a transient overlay without resizing the window, because a resize means a ```surfaceChanged``` and a swapchain rebuild every time. Re-asserted on every focus gain, since the bars come back on their own after an app switch or a dialog.
+- The overlays are declared AFTER the surface view in the layout, and that is the z order — the SurfaceView composites behind the window, so last means on top. No ```setZOrderOnTop```, no extra window: those exist for putting a SurfaceView ABOVE other views, which is the opposite problem.
+
+---
+
+### NativeAr (java, dev.dongeronimo.arreconstructor::NativeAr)
+- The Kotlin side of ```putorana::ar::Subsystem``` — ARCore, and nothing to do with Vulkan. Unlike ```NativeRenderer```, these are called from the UI THREAD, because the session's life follows the activity and not the surface. That distinction is the whole reason it is a separate object, and the native side takes a lock precisely because of it.
+- It remembers the last display geometry and replays it after ```create```, and that is not belt-and-braces. **The two things that determine the geometry arrive in an order nobody controls**: with the permission already granted the session exists before the surface, but with the dialog shown the grant lands long after the first ```surfaceChanged``` — so the geometry is reported to a session that does not exist yet and is silently dropped, and nothing would ever report it again, because ```surfaceChanged``` does not fire twice for the same surface. The symptom is a camera image rotated ninety degrees, but only on the very first run after an install.
+- Failure is reported, not thrown. No session means no camera background, and the cube still draws.
+
+---
+
+### NativeProfiler / PassTiming (java, dev.dongeronimo.arreconstructor::NativeProfiler)
+- Reads the renderer's GPU timings, and it is the ONE native call that does not come from the render thread. Everything on ```NativeRenderer``` must, and the native side relies on that to take no locks at all; ```GpuProfiler::Snapshot``` takes one so that this can be an exception.
+- The entries are whatever the passes declared, in the order they were recorded, so an enclosing scope comes before the passes inside it. **This side never has to know what passes exist**, and adding one changes no Kotlin at all.
+- An empty array is normal and not an error: before the first frames retire, while there is no surface, and forever on a device with no timestamp support.
+- The JNI side deletes both local references per entry. The local reference table is small and this runs several times a second; two leaked objects per entry would overflow it long before the frame loop noticed.
+
+---
 
 ### NativeRenderer (java, dev.dongeronimo.arreconstructor::NativeRenderer)
 - Mirrors the c++ public interface.
@@ -375,6 +516,8 @@ To reconstruct the real world into the virtual world so that I can use this data
 - The window Vulkan draws into. A SurfaceView and not a TextureView: it gets its own compositor layer, whose ANativeWindow is exactly what ```vkCreateAndroidSurfaceKHR``` wants. A TextureView's buffers detour through the view hierarchy's own rendering, which costs a copy per frame and adds latency.
 - Holds nothing but the render thread, and only while there is a surface to feed it. Surface, device and swapchain all have lifetimes tied to the surface rather than to the view or the Activity, so keeping any of them here would tie them to the wrong thing.
 - Its ```init``` hands the native side the AssetManager, before registering the surface callback so it cannot lose a race with a surface that already exists. The APPLICATION context's AssetManager, not the view's: native holds a global reference for the life of the process, and an Activity-scoped one would be pinned across configuration changes.
+- ```surfaceChanged``` tells ARCore the display geometry BEFORE it tells the render thread, and from THIS thread rather than the render thread. It needs the display rotation, which is a property of the view hierarchy, and it is the one piece of per-surface information a session whose life is the activity's still has to be told. Every rotation comes through here, which is what keeps the camera background upright with nothing being rebuilt — only the UVs ARCore hands back change.
+- ```display``` is a platform type and null for a detached view. A surface that is changing size is attached by definition, but the ```ROTATION_0``` fallback costs nothing and beats an NPE on a path this hard to reproduce.
 
 ---
 

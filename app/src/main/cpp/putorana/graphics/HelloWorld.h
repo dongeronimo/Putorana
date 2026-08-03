@@ -9,7 +9,10 @@
 #include "MeshPass.h"
 #include "World.h"
 
+#include <glm/glm.hpp>
+
 #include <memory>
+#include <optional>
 #include <string>
 
 namespace putorana::graphics {
@@ -57,6 +60,17 @@ private:
      * */
     Node* spinner_ = nullptr;
     float spinDegrees_ = 0.0f;
+
+    /**
+     * Where the centre depth sample says the world is, this frame. Empty when
+     * ARCore had no estimate there, which is common and not an error — the
+     * marker holds its last position rather than jumping to the origin.
+     *
+     * This is scaffolding for the first geometric test of the reconstruction
+     * maths, not a feature. It goes away once there is a real surface to draw.
+     * */
+    std::optional<glm::vec3> markerPoint_;
+    bool logMarkerOnce_ = true;
 
     /**
      * The camera node, and the AR camera hanging off it. Both non-owning: the

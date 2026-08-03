@@ -13,7 +13,9 @@
 
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <optional>
+#include <vector>
 
 namespace putorana::graphics {
 
@@ -35,6 +37,13 @@ class World;
  * The On* methods are the native half of SurfaceHolder.Callback. They do not run
  * on the UI thread: RenderThread.kt hops them onto the render thread first, so
  * everything in this class happens on that single thread and needs no locking.
+ *
+ * There is exactly ONE exception, and it is SnapshotTimings(). The debug overlay
+ * polls GPU timings from the UI thread while the render thread keeps rendering —
+ * that is the entire point of it — so that one path is synchronised and every
+ * other member is not. Anything else reached from another thread has to be added
+ * to this comment and given the same treatment, because the default here is no
+ * locking at all.
  * */
 class Device {
 public:
@@ -141,9 +150,29 @@ public:
      * belong to the VkDevice — so the Kotlin side must tolerate it going away
      * and coming back when the app is backgrounded.
      *
-     * Never null while HasSurface(), but may be disabled: see GpuProfiler.
+     * RENDER THREAD ONLY, and it is not null-checked. That thread is the one
+     * that creates and destroys the profiler, so it is the only one that can
+     * know the pointer is alive for the duration of a frame. Anyone else must
+     * use SnapshotTimings().
      * */
     GpuProfiler& profiler() const { return *profiler_; }
+
+    /**
+     * The timings, safe to call from any thread at any moment. Empty when there
+     * is no profiler right now.
+     *
+     * This exists because HasSurface() is NOT a valid guard for touching the
+     * profiler, which is what the UI thread used to do. The two are not created
+     * or destroyed together: OnSurfaceDestroyed frees the profiler and only
+     * nulls device_ eleven lines and a vkDestroyDevice later, and on the way up
+     * device_ is set before GpuProfiler::Create returns. Both leave a window
+     * where HasSurface() is true and the profiler is not there — which crashed
+     * inside Snapshot(), on the lock of a mutex that had been freed.
+     *
+     * So the check and the use have to happen under one lock, which means they
+     * have to happen in one function, which is this one.
+     * */
+    std::vector<PassTiming> SnapshotTimings() const;
 
     /**
      * The scene being drawn, or null before one is installed.
@@ -191,6 +220,13 @@ private:
     std::unique_ptr<DescriptorPool> descriptorPool_;
     std::unique_ptr<FrameRing> frames_;
     std::unique_ptr<GpuProfiler> profiler_;
+    /**
+     * Guards the profiler_ POINTER, not the object — GpuProfiler has its own
+     * lock for its contents. Held only where profiler_ is assigned or reset, and
+     * in SnapshotTimings(); the render thread's own profiler() calls stay
+     * unlocked because that thread is the one holding the object alive.
+     * */
+    mutable std::mutex profilerMutex_;
     std::unique_ptr<Swapchain> swapchain_;
     /** Declared last, so it is destroyed first — before the allocator it drew from. */
     std::unique_ptr<World> world_;

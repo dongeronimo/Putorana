@@ -45,7 +45,10 @@ void ArCamera::SetFrame(const ar::CameraFrame& frame, Node& node) {
         return;
     }
 
-    const ar::CameraPose& pose = frame.pose;
+    // displayPose, not sensorPose. This is the RENDERING half of the app, and
+    // the display-oriented pose is the one that agrees with the projection
+    // matrix above. Reconstruction takes the other one — see Subsystem.h.
+    const ar::CameraPose& pose = frame.displayPose;
     node.position = glm::vec3(pose.translation[0], pose.translation[1], pose.translation[2]);
     // ARCore's raw order is qx, qy, qz, qw; glm::quat's constructor takes w
     // first. Getting this wrong produces a rotation that looks plausible and is

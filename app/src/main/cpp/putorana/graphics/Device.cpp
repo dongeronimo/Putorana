@@ -201,12 +201,26 @@ bool Device::CreateLogicalDevice() {
         return false;
     }
 
-    profiler_ = GpuProfiler::Create(*this, error);
+    // Locked because the UI thread may be polling SnapshotTimings() right now,
+    // and device_ is already non-null by this point — so without this it can
+    // observe a half-assigned pointer, or the null one it was before.
+    {
+        std::lock_guard<std::mutex> lock(profilerMutex_);
+        profiler_ = GpuProfiler::Create(*this, error);
+    }
     if (profiler_ == nullptr) {
         __android_log_print(ANDROID_LOG_ERROR, kLogTag, "%s", error.c_str());
         return false;
     }
     return true;
+}
+
+std::vector<PassTiming> Device::SnapshotTimings() const {
+    std::lock_guard<std::mutex> lock(profilerMutex_);
+    if (profiler_ == nullptr) {
+        return {};
+    }
+    return profiler_->Snapshot();
 }
 
 void Device::OnSurfaceChanged(int32_t width, int32_t height) {
@@ -288,7 +302,12 @@ void Device::OnSurfaceDestroyed() {
         // vmaDestroyAllocator would only report as a leak assert.
         world_.reset();
         swapchain_.reset();
-        profiler_.reset();
+        // Locked: the UI thread polls this one, and it is freed well before
+        // device_ goes null below, so HasSurface() cannot be its guard.
+        {
+            std::lock_guard<std::mutex> lock(profilerMutex_);
+            profiler_.reset();
+        }
         frames_.reset();
         // After the world: its materials and passes hold sets allocated here,
         // and destroying a pool frees every set that came out of it.

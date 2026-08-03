@@ -145,6 +145,7 @@ add_library(${CMAKE_PROJECT_NAME} SHARED
         putorana/graphics/PerspectiveCamera.cpp
         putorana/graphics/PhysicalDevice.cpp
         putorana/graphics/Renderable.cpp
+        putorana/recon/Unproject.cpp
         putorana/graphics/ShaderModule.cpp
         putorana/graphics/Swapchain.cpp
         putorana/graphics/World.cpp
@@ -212,11 +213,24 @@ target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE
 # Specifies libraries CMake should link to your target library. You
 # can link libraries from various origins, such as libraries defined in this
 # build script, prebuilt third-party libraries, or Android system libraries.
+# OpenChisel: the TSDF reconstruction library behind putorana::recon. Vendored
+# and modified rather than consumed as-is — upstream is a catkin package, and the
+# local changes alter type layouts, which cannot be done from outside a library.
+# See third_party/open_chisel/README.md for provenance and the full diff.
+#
+# Own CMakeLists rather than a source glob here, because it also has to fetch
+# Eigen, and that is nobody else's business in this build.
+add_subdirectory(third_party/open_chisel)
+
+# Specifies libraries CMake should link to your target library. You
+# can link libraries from various origins, such as libraries defined in this
+# build script, prebuilt third-party libraries, or Android system libraries.
 target_link_libraries(${CMAKE_PROJECT_NAME}
         # List libraries link to the target library
         android
         arcore::sdk_c
         assimp::assimp
+        open_chisel
         ${jnigraphics-lib}
         ${camera2ndk-lib}
         ${mediandk-lib}

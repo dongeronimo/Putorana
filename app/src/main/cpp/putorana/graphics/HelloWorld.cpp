@@ -4,6 +4,8 @@
 #include "GltfLoader.h"
 #include "Swapchain.h"
 
+#include "recon/Unproject.h"
+
 #include <android/log.h>
 
 #include <utility>
@@ -143,6 +145,34 @@ void HelloWorld::Update(float deltaSeconds) {
             const ar::Subsystem::FrameGuard guard = subsystem->AcquireFrame();
             if (const ar::CameraFrame* arFrame = guard.get()) {
                 arCamera_->SetFrame(*arFrame, *cameraNode_);
+
+                // The centre-pixel unprojection test. Inside the same guard as
+                // the pose above, deliberately: the depth pointer belongs to an
+                // ArImage that the next Update releases, and the pose has to be
+                // the one from THIS frame or the point lands where the phone
+                // used to be.
+                //
+                // sensorPose, not displayPose — it is the one whose axes agree
+                // with the unrotated intrinsics the depth map carries.
+                if (arFrame->tracking) {
+                    markerPoint_ = recon::UnprojectCentre(arFrame->depth, arFrame->sensorPose);
+                    if (markerPoint_.has_value() && logMarkerOnce_) {
+                        logMarkerOnce_ = false;
+                        const glm::vec3& p = *markerPoint_;
+                        const glm::vec3 eye(arFrame->sensorPose.translation[0],
+                                            arFrame->sensorPose.translation[1],
+                                            arFrame->sensorPose.translation[2]);
+                        // The distance is the number to read. It should match
+                        // whatever the phone is pointed at — a wall a metre away
+                        // should say about 1.0. Everything else in the line is
+                        // for working out WHICH way it is wrong if it is.
+                        __android_log_print(ANDROID_LOG_INFO, kLogTag,
+                                            "RECONPROBE centre pixel -> world (%.3f, %.3f, %.3f), "
+                                            "camera at (%.3f, %.3f, %.3f), distance %.3f m",
+                                            p.x, p.y, p.z, eye.x, eye.y, eye.z,
+                                            glm::length(p - eye));
+                    }
+                }
             }
         }
     }
@@ -155,6 +185,20 @@ void HelloWorld::Update(float deltaSeconds) {
         // Tilted a little on X so the top face comes into view — a cube spun
         // only about Y shows the same silhouette all the way round.
         spinner_->SetEulerAngles(glm::vec3(20.0f, spinDegrees_, 0.0f));
+
+        // The cube becomes the marker for the unprojection test. It keeps
+        // spinning so it stays legible against the camera feed, and it is
+        // scaled down because a one-metre cube centred on a wall a metre away
+        // fills the screen and tells you nothing about where its centre is.
+        //
+        // Left where it was when there is no depth sample — the middle of the
+        // frame is 0 whenever ARCore could not measure there, and a marker that
+        // teleported to the origin on every such frame would flicker in a way
+        // that looks like a tracking failure.
+        if (markerPoint_.has_value()) {
+            spinner_->position = *markerPoint_;
+            spinner_->scale = glm::vec3(0.05f);
+        }
     }
 
     // Last, and it must be: the base closes every world matrix, so anything

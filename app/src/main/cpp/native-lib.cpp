@@ -132,13 +132,12 @@ Java_dev_dongeronimo_arreconstructor_NativeProfiler_passTimings(
     jmethodID constructor = env->GetMethodID(timingClass, "<init>", "(Ljava/lang/String;F)V");
 
     putorana::graphics::Device& device = putorana::graphics::device_holder::Get();
-    // HasSurface is the guard, not a null check on the profiler: the profiler is
-    // destroyed with the device every time the app is backgrounded, and this can
-    // legitimately be called in that window.
-    std::vector<putorana::graphics::PassTiming> timings;
-    if (device.HasSurface()) {
-        timings = device.profiler().Snapshot();
-    }
+    // SnapshotTimings, not HasSurface() + profiler(). That pairing was a
+    // use-after-free: the profiler is NOT destroyed with the device, it is
+    // destroyed before it, so HasSurface() stays true across a window in which
+    // the profiler is already gone. Checking and using under one lock is the
+    // whole reason that method exists — see Device.h.
+    std::vector<putorana::graphics::PassTiming> timings = device.SnapshotTimings();
 
     jobjectArray result = env->NewObjectArray(static_cast<jsize>(timings.size()), timingClass,
                                               nullptr);

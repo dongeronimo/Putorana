@@ -91,9 +91,11 @@ struct CameraImage {
 /**
  * Where ARCore believes the device is, and how it is held.
  *
- * The DISPLAY-ORIENTED pose, not the raw sensor one: it already accounts for the
- * display rotation, so it is the one that matches the projection matrix below
- * and the one worth writing into a scene graph.
+ * Both poses ARCore offers have this shape, and WHICH ONE you are holding is
+ * the thing to keep straight — see CameraFrame::displayPose and
+ * CameraFrame::sensorPose. They differ by a rotation about the view axis of a
+ * multiple of 90 degrees, which means picking the wrong one produces a result
+ * that is not subtly off but sideways.
  *
  * Only meaningful while tracking. Before the first successful localisation, and
  * whenever tracking is lost, the numbers are stale rather than wrong-but-close,
@@ -103,6 +105,107 @@ struct CameraPose {
     /** Unit quaternion in ARCore's raw order: qx, qy, qz, qw. */
     float rotation[4] = {0.0f, 0.0f, 0.0f, 1.0f};
     float translation[3] = {};
+};
+
+/**
+ * A pinhole camera's intrinsic parameters, in pixels, for one specific image.
+ *
+ * ## What the four numbers mean
+ *
+ * They are the whole of the 3D-to-2D map. A point (X, Y, Z) in camera space,
+ * with Z measured ALONG THE PRINCIPAL AXIS (the direction the lens points),
+ * lands on the pixel
+ *
+ *     u = fx * (X / Z) + cx
+ *     v = fy * (Y / Z) + cy
+ *
+ * `fx` and `fy` are the focal length expressed in pixel widths and pixel
+ * heights. They differ from each other only when the sensor's pixels are not
+ * square, which on a phone they essentially always are — so expect fx ~= fy and
+ * treat a large gap between them as a bug rather than as a property of the
+ * hardware. `cx`, `cy` are the principal point: where the optical axis actually
+ * pierces the sensor, which is NEAR the centre of the image but not exactly at
+ * it, and the difference is why ARCore's projection matrix has off-diagonal
+ * terms (see ArCamera.cpp).
+ *
+ * ## Why the resolution is part of it
+ *
+ * All four numbers are in pixels OF A PARTICULAR IMAGE. The same lens described
+ * against a 640x480 image and against a 160x120 one gives fx four times apart.
+ * So intrinsics without the dimensions they were measured at are not a
+ * description of anything, and `width`/`height` travel with them for that
+ * reason — they are what lets a reader (or a rescale) tell the two apart.
+ * */
+struct Intrinsics {
+    /** Focal length in pixels, horizontal and vertical. */
+    float fx = 0.0f;
+    float fy = 0.0f;
+
+    /** Principal point in pixels, from the top-left of the image. */
+    float cx = 0.0f;
+    float cy = 0.0f;
+
+    /** The image these are expressed against. Meaningless without it. */
+    int32_t width = 0;
+    int32_t height = 0;
+};
+
+/**
+ * One frame's depth map: how far away the world is, per pixel.
+ *
+ * ## The units, and the one that is not obvious
+ *
+ * Each sample is an unsigned 16-bit count of MILLIMETRES, 0 to 65535 (about 65
+ * metres), and a zero means "no estimate here" rather than "zero distance".
+ *
+ * The part worth reading twice: it is the distance ALONG THE CAMERA'S PRINCIPAL
+ * AXIS, not the length of the ray to the point. It is Z, not range. That is the
+ * convenient case — unprojecting is then two multiplies and no square root (see
+ * recon/README.md) — but code written for a time-of-flight sensor, which
+ * usually reports range, is wrong here in a way that bulges the reconstruction
+ * outward at the edges of the frame while looking perfect at the centre.
+ *
+ * ARCore's own accuracy note: best between 0.5m and 15m, usable to 25m, with
+ * error growing QUADRATICALLY with distance. That quadratic is not a footnote —
+ * it is the reason a TSDF integrator weights near samples above far ones.
+ *
+ * ## Borrowed, like the camera image
+ *
+ * `millimetres` points into an ArImage this object holds and releases on the
+ * NEXT Update. Same rule as CameraImage: consume it inside the frame, never
+ * store the pointer.
+ *
+ * ## Two strides, one of which is in the wrong unit for the pointer
+ *
+ * `rowStrideBytes` is what ARCore reports, and ARCore reports BYTES, while the
+ * pointer is uint16. Row y therefore starts at
+ *
+ *     millimetres + y * (rowStrideBytes / 2)
+ *
+ * and indexing it as `millimetres[y * width + x]` is only correct when the rows
+ * happen not to be padded. The unit is in the name so that the division is hard
+ * to forget.
+ * */
+struct DepthImage {
+    int32_t width = 0;
+    int32_t height = 0;
+
+    /** Millimetres along the principal axis. 0 means no estimate. */
+    const uint16_t* millimetres = nullptr;
+
+    /** Distance between row starts, in BYTES, not in uint16s. */
+    int32_t rowStrideBytes = 0;
+
+    /**
+     * Intrinsics expressed against THIS image's dimensions.
+     *
+     * Not what ARCore handed over: it describes the CPU image, which is several
+     * times larger. Rescaled on the way in, because intrinsics belonging to a
+     * different resolution than the pixels they are used with is the single
+     * easiest way to build a reconstruction that is a consistent, plausible,
+     * completely wrong size.
+     * */
+    Intrinsics intrinsics;
 };
 
 /**
@@ -127,8 +230,57 @@ struct CameraFrame {
      * */
     float projection[16] = {};
 
-    /** Display-oriented pose. Read `tracking` before believing it. */
-    CameraPose pose;
+    /**
+     * The pose to RENDER with: ARCore's display-oriented pose.
+     *
+     * +X right, +Y up, -Z into the scene, with "right" and "up" meaning what
+     * they mean to someone holding the phone — the display rotation is already
+     * folded in. That is what makes it agree with `projection` above, and what
+     * makes it the one to write into a scene graph.
+     *
+     * Read `tracking` before believing it.
+     * */
+    CameraPose displayPose;
+
+    /**
+     * The pose to RECONSTRUCT with: ARCore's physical camera pose.
+     *
+     * Same origin, same axis convention (+X right, +Y up, -Z forward), but
+     * "right" and "up" are relative to the SENSOR's readout order rather than
+     * to the display. ARCore's header states the two differ by a local rotation
+     * about Z by a multiple of 90 degrees.
+     *
+     * This is the one that belongs with `depth` and `imageIntrinsics`, and the
+     * reason is that those two describe UNROTATED images. ARCore says so
+     * outright: ArCamera_getImageIntrinsics returns "the unrotated and uncropped
+     * intrinsics for the image (CPU) stream", and the AR_COORDINATES_2D_IMAGE_*
+     * spaces are documented as the CPU image while the VIEW ones are explicitly
+     * "display-rotated". Pixels that were never rotated must be unprojected with
+     * a pose that was never rotated either.
+     *
+     * Using `displayPose` here instead does not go subtly wrong. In portrait it
+     * lays the reconstructed room on its side.
+     * */
+    CameraPose sensorPose;
+
+    /**
+     * Intrinsics for the CPU camera image — `image` below, not `depth`.
+     *
+     * Kept even though `depth.intrinsics` is what the reconstruction reads,
+     * because the rescale that produces the latter is only checkable against
+     * the former. When a reconstruction comes out uniformly too large or too
+     * small, these two side by side are where the factor shows up.
+     * */
+    Intrinsics imageIntrinsics;
+
+    /**
+     * This frame's depth map, or a default-constructed one when there is none.
+     *
+     * `millimetres` null is the normal state on a device without depth support,
+     * before tracking has converged, and for the first frames after a resume.
+     * It is not an error and nothing should log about it per frame.
+     * */
+    DepthImage depth;
 
     /** True only when ARCore reports AR_TRACKING_STATE_TRACKING this frame. */
     bool tracking = false;
@@ -259,17 +411,31 @@ public:
     /** True between a successful Resume and the next Pause. */
     bool running() const { return running_; }
 
+    /**
+     * Whether this device can produce depth at all, decided once at Create.
+     *
+     * False is a legitimate device, not a failure: the Depth API is a
+     * per-device capability and ARCore runs perfectly well without it. What is
+     * NOT legitimate is reconstructing from a session that answered false here,
+     * so this is the flag whoever builds the reconstruction has to consult
+     * before deciding it has anything to do.
+     * */
+    bool depthSupported() const { return depthSupported_; }
+
 private:
     Subsystem() = default;
 
-    /** Drops the held ArImage, if any. Caller holds the mutex. */
+    /** Drops the held ArImages, if any. Caller holds the mutex. */
     void ReleaseImage();
 
-    /** Pose, projection, tracking state and the UV basis. Caller holds the mutex. */
+    /** Poses, intrinsics, projection, tracking state, UV basis. Caller holds the mutex. */
     void ReadCamera();
 
     /** The CPU image. Best effort — leaves the planes null when unavailable. */
     void ReadCameraImage();
+
+    /** The depth map. Best effort — leaves it null whenever there is none. */
+    void ReadDepthImage();
 
     mutable std::mutex mutex_;
 
@@ -279,8 +445,11 @@ private:
     void* session_ = nullptr;
     void* arFrame_ = nullptr;
     void* image_ = nullptr;
+    void* depthImage_ = nullptr;
     /** Allocated once and reused: ArPose_create every frame would be litter. */
     void* pose_ = nullptr;
+    /** Likewise, and reused for both the image and the depth reads. */
+    void* intrinsics_ = nullptr;
 
     float nearPlane_ = 0.1f;
     float farPlane_ = 1000.0f;
@@ -289,8 +458,27 @@ private:
     bool hasFrame_ = false;
     bool running_ = false;
 
+    /** Answered by ArSession_isDepthModeSupported at Create, and fixed after. */
+    bool depthSupported_ = false;
+
     /** So a device that cannot produce CPU images says so once, not every frame. */
     bool warnedAboutImage_ = false;
+
+    /** The same, for depth: one line per reason, not sixty a second. */
+    bool warnedAboutDepth_ = false;
+
+    /**
+     * So the first depth map that arrives gets its dimensions and rescaled
+     * intrinsics printed exactly once.
+     *
+     * This is not decoration. The rescale in ReadDepthImage assumes the depth
+     * map covers the same field of view as the CPU image, and ARCore documents
+     * the depth resolution as depending on "the device and its display aspect
+     * ratio" — wording that leaves room for a crop rather than a clean scale.
+     * The two aspect ratios in that one log line are what settles it on a real
+     * device, which is the only place it can be settled.
+     * */
+    bool logDepthOnce_ = true;
 
     /** Set by SetDisplayGeometry, so one set of UVs is logged after each change. */
     bool logUvOnce_ = false;
