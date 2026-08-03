@@ -26,6 +26,24 @@ namespace putorana::graphics {
 enum class VertexFormat {
     Static,
     Skinned,
+    /**
+     * Position and normal, nothing else. For geometry that is generated rather
+     * than authored — the reconstruction's chunk meshes — where there is no
+     * texture and therefore no UV to store.
+     *
+     * It exists because the alternative was writing 8 bytes of zeroes per vertex
+     * that no shader ever reads. That is 25% of the largest buffer in the app: a
+     * room at 4cm voxels is on the order of a million reconstructed vertices, so
+     * the UV lane alone would be ~8 MB of a phone's budget, plus its share of
+     * every byte of upload traffic on every remesh.
+     *
+     * The cost is a second pipeline, because vertex input layout is baked into
+     * one. That in turn means a second material with a good deal of duplication
+     * against FlatColorMaterial — a deliberate, known debt to be paid off by
+     * factoring the common pipeline setup out later, not by carrying dead lanes
+     * forever.
+     * */
+    PositionNormal,
 };
 
 enum class MeshStorage {
@@ -52,6 +70,21 @@ struct StaticVertex {
     glm::vec2 uv;
 };
 static_assert(sizeof(StaticVertex) == 32, "StaticVertex must stay tightly packed at 32 bytes");
+
+/**
+ * 24 bytes. The generated-geometry format — see VertexFormat::PositionNormal.
+ *
+ * Position and normal sit at the same offsets as StaticVertex's, deliberately.
+ * Anything that only wants those two (bounds, culling, a depth-only pass) reads
+ * both formats with the same offsets and only a different stride, which is the
+ * same invariant the static_asserts in Mesh.cpp protect for SkinnedVertex.
+ * */
+struct PositionNormalVertex {
+    glm::vec3 position;
+    glm::vec3 normal;
+};
+static_assert(sizeof(PositionNormalVertex) == 24,
+              "PositionNormalVertex must stay tightly packed at 24 bytes");
 
 /**
  * 52 bytes: the static layout, a quad of joint indices and four float weights.
@@ -85,6 +118,13 @@ static_assert(alignof(SkinnedVertex) == 4,
 
 /** Bytes per vertex for a format. */
 uint32_t VertexStrideFor(VertexFormat format);
+
+/**
+ * The format's name, for diagnostics. Exists so that a log line naming a format
+ * cannot drift out of date when a format is added — which it silently did the
+ * first time, calling everything that was not skinned "static".
+ * */
+const char* VertexFormatName(VertexFormat format);
 
 /**
  * Axis-aligned bounding box. Local space when it comes off a Mesh, world space

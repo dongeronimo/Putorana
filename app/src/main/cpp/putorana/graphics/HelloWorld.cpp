@@ -1,10 +1,12 @@
 #include "HelloWorld.h"
 
+#include "ChunkMaterial.h"
 #include "Device.h"
-#include "GltfLoader.h"
+#include "FrameRing.h"
 #include "Swapchain.h"
 
-#include "recon/Unproject.h"
+
+#include <algorithm>
 
 #include <android/log.h>
 
@@ -15,11 +17,27 @@ namespace putorana::graphics {
 namespace {
 
 constexpr const char* kLogTag = "ARReconstructor";
-constexpr const char* kCubeAsset = "unitary_cube.glb";
-constexpr const char* kMaterialName = "FlatOrange";
+constexpr const char* kChunkMaterialName = "ReconChunk";
 
-/** Slow enough to watch a face turn away, fast enough to be obviously alive. */
-constexpr float kSpinDegreesPerSecond = 45.0f;
+/**
+ * Chunks remeshed per frame. Integration marks the whole 3x3x3 neighbourhood of
+ * every chunk it touches, so a sweep of a room dirties hundreds at once and
+ * marching cubes on all of them inside one frame is a dropped frame. What is not
+ * done stays marked.
+ * */
+constexpr uint32_t kRemeshBudgetPerFrame = 8;
+
+/**
+ * Vertices a chunk mesh is allocated for. A GUESS, and the histogram below is
+ * what replaces it with a measurement.
+ *
+ * It matters because MeshStorage::Mutable fixes capacity at creation: too small
+ * and dense chunks are dropped, too large and most of the biggest allocation in
+ * the app is empty. A 16^3 chunk can in theory emit tens of thousands of
+ * vertices; a chunk holding one wall emits a few hundred.
+ * */
+constexpr uint32_t kChunkVertexCapacity = 4096;
+constexpr uint32_t kChunkIndexCapacity = kChunkVertexCapacity * 3;
 
 } // namespace
 
@@ -33,9 +51,9 @@ bool HelloWorld::CreateRenderPasses(const Swapchain& swapchain, std::string& err
     }
 
     // Not a pass — it draws nothing. It only owns the camera's two textures, for
-    // the final pass to composite. Its failure is not the world's: no camera
-    // means no background, and a cube on a blue field is still a perfectly good
-    // picture. So the error is logged and swallowed here rather than returned.
+    // the final pass to composite. Its failure is not the world's: no background
+    // still leaves the reconstruction drawn on the clear colour, which is worth
+    // having. So the error is logged and swallowed here rather than returned.
     std::string cameraError;
     cameraFeed_ = CameraFeed::Create(device(), cameraError);
     if (cameraFeed_ == nullptr) {
@@ -48,66 +66,47 @@ bool HelloWorld::CreateRenderPasses(const Swapchain& swapchain, std::string& err
 }
 
 bool HelloWorld::CreateWorld(std::string& error) {
-    // The material first: the loader leaves every renderable without one, and
-    // assigning them below needs it to already exist.
-    auto material = FlatColorMaterial::Create(device(), glm::vec4(0.95f, 0.55f, 0.15f, 1.0f),
-                                              error);
-    if (material == nullptr) {
-        return false;
-    }
-    Material* flat = AddMaterial(kMaterialName, std::move(material));
-    if (flat == nullptr) {
-        error = "HelloWorld: could not register the material";
-        return false;
-    }
+    // No cube any more.
+    //
+    // It was scaffolding and it did its job twice: first as the thing that
+    // proved geometry was arriving with the right winding, normals and depth
+    // order, then as the marker that proved the unprojection maths — the frozen
+    // marker staying nailed to a wall while the phone moved is what ruled out
+    // both axis flips, the quaternion order and the choice of pose. The
+    // reconstruction now tests all of that continuously and far harder, so a
+    // spinning cube in the middle of it is just something in the way.
 
-    GltfLoadResult loaded;
-    if (!LoadGltf(*this, kCubeAsset, loaded, error)) {
-        return false;
-    }
-    if (loaded.meshes.empty()) {
-        error = std::string("HelloWorld: '") + kCubeAsset + "' produced no geometry";
-        return false;
-    }
-
-    // The file's roots come back detached — this is where they join the world.
-    for (std::unique_ptr<Node>& fileRoot : loaded.roots) {
-        Node* attached = root().AddChild(std::move(fileRoot));
-        if (spinner_ == nullptr) {
-            spinner_ = attached;
-        }
-    }
-
-    // Every renderable the file produced gets the one material there is. This is
-    // the step that will read the node's "Material" custom property instead,
-    // once the loader reads extras and there is more than one material to pick.
-    for (Node* node : loaded.nodes) {
-        if (node->renderable.has_value()) {
-            node->renderable->material = flat;
-        }
-    }
-
-    // The second node: the camera. A sibling of the cube rather than a child,
-    // so spinning the cube does not spin the camera with it.
+    // The camera is the only node this world builds. Everything else in the
+    // scene arrives from the reconstruction, one node per chunk.
     Node* eye = root().AddChild(Node::Create("camera"));
     cameraNode_ = eye;
 
     // Which KIND of camera is the one decision this world makes about AR. With a
     // session, ARCore owns both the projection and the pose, and the node's
-    // transform becomes an output rather than something set here. Without one,
-    // this stays the fixed vantage point it always was, so the cube is still
-    // visible on a device that cannot do AR at all.
+    // transform becomes an output rather than something set here.
     if (ar::Subsystem* subsystem = ar::subsystem_holder::Get()) {
-        // ARCore's world origin is wherever the device was when the session
-        // started, so a cube left at the origin is a cube the camera is standing
-        // INSIDE — clipped away by the near plane, and indistinguishable from a
-        // projection that does not work. Two metres down -Z puts it in front of
-        // where the user was looking, at a size a one-metre cube should be.
+        // The reconstruction, and the material its chunks are drawn with.
         //
-        // Units are metres here, and really are: this is the one camera in the
-        // engine whose scene has a physical scale.
-        if (spinner_ != nullptr) {
-            spinner_->position = glm::vec3(0.0f, 0.0f, -2.0f);
+        // reconstruction_holder, not a member: this world dies with the Device
+        // every time the app is backgrounded, and the reconstruction must not.
+        // Create is a no-op when one already exists, which is exactly what
+        // coming back from background looks like.
+        auto chunkMaterial = ChunkMaterial::Create(
+                device(), glm::vec4(0.45f, 0.72f, 0.95f, 1.0f), error);
+        if (chunkMaterial == nullptr) {
+            return false;
+        }
+        chunkMaterial_ = AddMaterial(kChunkMaterialName, std::move(chunkMaterial));
+
+        recon::Config reconConfig;
+        if (recon::reconstruction_holder::Create(reconConfig, error) == nullptr) {
+            __android_log_print(ANDROID_LOG_ERROR, kLogTag, "reconstruction: %s", error.c_str());
+        } else if (recon::Reconstruction* reconstruction =
+                           recon::reconstruction_holder::Get()) {
+            // Everything it already has, as if it had just changed. On a first
+            // run this is empty; after a trip to background it is the whole map,
+            // because every node holding it was destroyed with the Device.
+            reconstruction->MarkAllDirty();
         }
 
         auto camera = ArCamera::Create();
@@ -118,17 +117,21 @@ bool HelloWorld::CreateWorld(std::string& error) {
         arCamera_ = camera.get();
         eye->camera = std::move(camera);
         __android_log_print(ANDROID_LOG_INFO, kLogTag,
-                            "HelloWorld ready: %zu meshes, AR camera", loaded.meshes.size());
+                            "HelloWorld ready: AR camera, reconstruction on");
     } else {
+        // No ARCore means no depth, so nothing will ever be reconstructed and
+        // this scene stays empty — the camera feed is gone too, so the screen is
+        // the clear colour and nothing else. That is now the honest picture of
+        // what this app can do on such a device, where before it was a cube.
         eye->camera = PerspectiveCamera::Create();
         eye->position = glm::vec3(2.0f, 3.0f, 5.0f);
         // LookAt reads the node's world matrix, and it is fresh here because
         // ComputeWorldMatrix walks the parent chain rather than trusting the
         // cache — which has not been filled yet, since no frame has run.
         eye->LookAt(glm::vec3(0.0f, 0.0f, 0.0f));
-        __android_log_print(ANDROID_LOG_INFO, kLogTag,
-                            "HelloWorld ready: %zu meshes, camera at (2,3,5) aimed at the origin",
-                            loaded.meshes.size());
+        __android_log_print(ANDROID_LOG_WARN, kLogTag,
+                            "HelloWorld ready: no ARCore, so nothing to reconstruct and nothing "
+                            "to draw");
     }
     return true;
 }
@@ -146,67 +149,168 @@ void HelloWorld::Update(float deltaSeconds) {
             if (const ar::CameraFrame* arFrame = guard.get()) {
                 arCamera_->SetFrame(*arFrame, *cameraNode_);
 
-                // The centre-pixel unprojection test. Inside the same guard as
-                // the pose above, deliberately: the depth pointer belongs to an
-                // ArImage that the next Update releases, and the pose has to be
-                // the one from THIS frame or the point lands where the phone
+                // Under the same guard, and it has to be: the depth pointer
+                // belongs to an ArImage the next Update releases, and the pose
+                // has to be this frame's or the geometry lands where the phone
                 // used to be.
-                //
-                // sensorPose, not displayPose — it is the one whose axes agree
-                // with the unrotated intrinsics the depth map carries.
-                if (arFrame->tracking) {
-                    markerPoint_ = recon::UnprojectCentre(arFrame->depth, arFrame->sensorPose);
-                    if (markerPoint_.has_value() && logMarkerOnce_) {
-                        logMarkerOnce_ = false;
-                        const glm::vec3& p = *markerPoint_;
-                        const glm::vec3 eye(arFrame->sensorPose.translation[0],
-                                            arFrame->sensorPose.translation[1],
-                                            arFrame->sensorPose.translation[2]);
-                        // The distance is the number to read. It should match
-                        // whatever the phone is pointed at — a wall a metre away
-                        // should say about 1.0. Everything else in the line is
-                        // for working out WHICH way it is wrong if it is.
-                        __android_log_print(ANDROID_LOG_INFO, kLogTag,
-                                            "RECONPROBE centre pixel -> world (%.3f, %.3f, %.3f), "
-                                            "camera at (%.3f, %.3f, %.3f), distance %.3f m",
-                                            p.x, p.y, p.z, eye.x, eye.y, eye.z,
-                                            glm::length(p - eye));
-                    }
-                }
+                UpdateReconstruction(*arFrame);
             }
         }
     }
 
-    if (spinner_ != nullptr) {
-        // Accumulated in degrees and never wrapped, which is exactly what the
-        // unbounded Euler interface is for: the angle keeps climbing past 360
-        // and the quaternion it drives is perfectly well behaved.
-        spinDegrees_ += kSpinDegreesPerSecond * deltaSeconds;
-        // Tilted a little on X so the top face comes into view — a cube spun
-        // only about Y shows the same silhouette all the way round.
-        spinner_->SetEulerAngles(glm::vec3(20.0f, spinDegrees_, 0.0f));
-
-        // The cube becomes the marker for the unprojection test. It keeps
-        // spinning so it stays legible against the camera feed, and it is
-        // scaled down because a one-metre cube centred on a wall a metre away
-        // fills the screen and tells you nothing about where its centre is.
-        //
-        // Left where it was when there is no depth sample — the middle of the
-        // frame is 0 whenever ARCore could not measure there, and a marker that
-        // teleported to the origin on every such frame would flicker in a way
-        // that looks like a tracking failure.
-        if (markerPoint_.has_value()) {
-            spinner_->position = *markerPoint_;
-            spinner_->scale = glm::vec3(0.05f);
-        }
-    }
-
     // Last, and it must be: the base closes every world matrix, so anything
-    // moved after this call would land a frame late.
+    // moved after this call would land a frame late. That is also why the
+    // reconstruction runs above rather than in Render — it creates nodes.
     World::Update(deltaSeconds);
 }
 
+void HelloWorld::UpdateReconstruction(const ar::CameraFrame& frame) {
+    recon::Reconstruction* reconstruction = recon::reconstruction_holder::Get();
+    if (reconstruction == nullptr || chunkMaterial_ == nullptr || !frame.tracking) {
+        return;
+    }
+
+    reconstruction->Integrate(frame.depth, frame.sensorPose);
+    reconstruction->Remesh(kRemeshBudgetPerFrame);
+    reconstruction->CollectUpdates(chunkChanged_, chunkRemoved_);
+
+    for (const recon::ChunkKey& key : chunkRemoved_) {
+        const auto found = chunkNodes_.find(SpaceChunk{key.x, key.y, key.z});
+        if (found == chunkNodes_.end()) {
+            continue;
+        }
+        // The node stays. Node has no RemoveChild, and it would be the wrong
+        // thing anyway: a chunk that empties out is usually one the sensor has
+        // not seen enough of yet, and it comes back. Clearing the renderable
+        // hides it and leaves the mesh allocated for when it does.
+        if (found->second.node != nullptr) {
+            found->second.node->renderable.reset();
+        }
+        found->second.uploadsRemaining = 0;
+    }
+
+    for (const recon::ChunkUpdate& update : chunkChanged_) {
+        const SpaceChunk key{update.key.x, update.key.y, update.key.z};
+        ChunkNode& entry = chunkNodes_[key];
+
+        if (entry.node == nullptr) {
+            Node* node = root().AddChild(Node::Create("chunk"));
+            node->position = update.origin;
+            node->spaceChunk = key;
+            entry.node = node;
+        }
+
+        if (entry.mesh == nullptr) {
+            MeshDesc desc;
+            desc.name = "chunk";
+            desc.format = VertexFormat::PositionNormal;
+            // Mutable: written again every time the chunk is remeshed, which
+            // happens for as long as the sensor keeps seeing it.
+            desc.storage = MeshStorage::Mutable;
+            desc.vertexCapacity = kChunkVertexCapacity;
+            desc.indexCapacity = kChunkIndexCapacity;
+
+            std::string error;
+            std::unique_ptr<Mesh> mesh =
+                    Mesh::Create(device().allocator().handle(), desc, error);
+            if (mesh == nullptr) {
+                __android_log_print(ANDROID_LOG_ERROR, kLogTag, "chunk mesh: %s", error.c_str());
+                continue;
+            }
+            entry.mesh = AddMesh(std::move(mesh));
+        }
+
+        // --- the measurement that settles kChunkVertexCapacity ---
+        const size_t bucket = std::min<size_t>(chunkVertexHistogram_.size() - 1,
+                                               update.vertexCount / 512);
+        ++chunkVertexHistogram_[bucket];
+        ++chunkMeshCount_;
+        if (update.vertexCount > kChunkVertexCapacity ||
+            update.indexCount > kChunkIndexCapacity) {
+            ++chunkOverflowCount_;
+            // Skipped rather than truncated: half a chunk of geometry is a hole
+            // with a torn edge, which reads as a reconstruction bug rather than
+            // as the capacity problem it is.
+            continue;
+        }
+
+        entry.vertexCount = update.vertexCount;
+        entry.indexCount = update.indexCount;
+        entry.uploadsRemaining = FrameRing::kFramesInFlight;
+    }
+
+    if (!loggedChunkHistogram_ && chunkMeshCount_ >= 200) {
+        loggedChunkHistogram_ = true;
+        __android_log_print(ANDROID_LOG_INFO, kLogTag,
+                            "RECONPROBE chunk vertex counts over %u remeshes, in buckets of 512: "
+                            "%u %u %u %u %u %u %u %u (last bucket is 3584+); "
+                            "%u exceeded the %u capacity",
+                            chunkMeshCount_, chunkVertexHistogram_[0], chunkVertexHistogram_[1],
+                            chunkVertexHistogram_[2], chunkVertexHistogram_[3],
+                            chunkVertexHistogram_[4], chunkVertexHistogram_[5],
+                            chunkVertexHistogram_[6], chunkVertexHistogram_[7],
+                            chunkOverflowCount_, kChunkVertexCapacity);
+    }
+}
+
+void HelloWorld::UploadDirtyChunks(uint32_t frameIndex) {
+    recon::Reconstruction* reconstruction = recon::reconstruction_holder::Get();
+    if (reconstruction == nullptr) {
+        return;
+    }
+
+    for (auto& [key, entry] : chunkNodes_) {
+        if (entry.uploadsRemaining == 0 || entry.mesh == nullptr || entry.node == nullptr) {
+            continue;
+        }
+
+        if (entry.vertexCount == 0 || entry.indexCount == 0) {
+            entry.uploadsRemaining = 0;
+            continue;
+        }
+
+        vertexScratch_.resize(kChunkVertexCapacity);
+        indexScratch_.resize(kChunkIndexCapacity);
+        if (!reconstruction->WriteChunk(recon::ChunkKey{key.x, key.y, key.z},
+                                        vertexScratch_.data(), kChunkVertexCapacity,
+                                        indexScratch_.data(), kChunkIndexCapacity)) {
+            // The chunk went away between Update and here, or it outgrew the
+            // capacity. Either way there is nothing to upload and retrying next
+            // frame would not help.
+            entry.uploadsRemaining = 0;
+            continue;
+        }
+
+        // The COUNTS, not the scratch buffer's size: WriteChunk fills only what
+        // the chunk has, and the rest of the buffer is whatever the last chunk
+        // left there.
+        //
+        // One region per call — see ChunkNode::uploadsRemaining.
+        entry.mesh->Update(frameIndex, vertexScratch_.data(), entry.vertexCount,
+                           indexScratch_.data(), entry.indexCount);
+        --entry.uploadsRemaining;
+
+        if (!entry.node->renderable.has_value()) {
+            entry.node->renderable = Renderable(*entry.mesh);
+            entry.node->renderable->material = chunkMaterial_;
+        }
+    }
+}
+
 void HelloWorld::Render(const FrameContext& frame) {
+    // Chunk geometry first, and it has to be HERE rather than in Update.
+    //
+    // Update runs before FrameRing::BeginFrame, which is the call that blocks
+    // until the slot being reused has retired on the GPU. Writing a mesh region
+    // before that returns is a write into memory a draw from two frames ago may
+    // still be reading. By the time Render is called the slot is ours, and no
+    // pass below has recorded a draw against it yet — which is the only window
+    // where both are true.
+    //
+    // No GpuScope: this is CPU work into mapped memory and records no commands,
+    // so a GPU timestamp around it would measure nothing.
+    UploadDirtyChunks(frame.frameIndex);
+
     // The camera image goes up first, and outside any rendering scope, because
     // buffer-to-image copies and image barriers are both illegal inside one.
     // It opens no scope of its own — the final pass is what draws it.

@@ -177,6 +177,18 @@ namespace chisel
 
             const ChunkSet& GetMeshesToUpdate() const { return meshesToUpdate; }
 
+            // LOCAL MODIFICATION: mutable access to the dirty set.
+            //
+            // Upstream's only way to remesh is UpdateMeshes(), which does EVERY
+            // dirty chunk and then clears the set. Sweeping a room dirties
+            // hundreds at once -- integration marks the whole 3x3x3 neighbourhood
+            // of every touched chunk, a few lines above -- and marching cubes on
+            // all of them inside one frame is a dropped frame.
+            //
+            // With this, a caller can take a bounded number per frame and leave
+            // the rest marked, which is what putorana::recon::Reconstruction does.
+            ChunkSet& GetMutableMeshesToUpdate() { return meshesToUpdate; }
+
         protected:
             ChunkManager chunkManager;
             ChunkSet meshesToUpdate;

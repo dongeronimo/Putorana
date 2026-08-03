@@ -34,7 +34,27 @@ uint32_t IndexSizeFor(VkIndexType type) {
 } // namespace
 
 uint32_t VertexStrideFor(VertexFormat format) {
-    return format == VertexFormat::Skinned ? sizeof(SkinnedVertex) : sizeof(StaticVertex);
+    switch (format) {
+        case VertexFormat::Skinned:
+            return sizeof(SkinnedVertex);
+        case VertexFormat::PositionNormal:
+            return sizeof(PositionNormalVertex);
+        case VertexFormat::Static:
+            break;
+    }
+    return sizeof(StaticVertex);
+}
+
+const char* VertexFormatName(VertexFormat format) {
+    switch (format) {
+        case VertexFormat::Skinned:
+            return "skinned";
+        case VertexFormat::PositionNormal:
+            return "position+normal";
+        case VertexFormat::Static:
+            break;
+    }
+    return "static";
 }
 
 VkPipelineVertexInputStateCreateInfo VertexInput::CreateInfo() const {
@@ -69,6 +89,20 @@ VertexInput VertexInputFor(VertexFormat format) {
     input.attributes[1].binding = 0;
     input.attributes[1].format = VK_FORMAT_R32G32B32_SFLOAT;
     input.attributes[1].offset = offsetof(StaticVertex, normal);
+
+    // Position and normal are declared once, above, for every format. They are
+    // at the same offsets in all three vertex structs, which is what lets this
+    // function share them instead of branching three ways.
+    static_assert(offsetof(StaticVertex, position) == offsetof(PositionNormalVertex, position));
+    static_assert(offsetof(StaticVertex, normal) == offsetof(PositionNormalVertex, normal));
+
+    if (format == VertexFormat::PositionNormal) {
+        // Stops at two. There is no UV in this format, and declaring location 2
+        // anyway would have the pipeline read 8 bytes past the end of the last
+        // vertex in the buffer.
+        input.attributeCount = 2;
+        return input;
+    }
 
     input.attributes[2].location = 2;
     input.attributes[2].binding = 0;
@@ -179,7 +213,7 @@ std::unique_ptr<Mesh> Mesh::Create(VmaAllocator allocator, const MeshDesc& desc,
     __android_log_print(ANDROID_LOG_INFO, kLogTag,
                         "mesh '%s': %s, %s, %u verts (%u B each), %u indices (%s), %llu KiB",
                         desc.name.c_str(),
-                        desc.format == VertexFormat::Skinned ? "skinned" : "static",
+                        VertexFormatName(desc.format),
                         isMutable ? "mutable" : "immutable", mesh->vertexCapacity_,
                         mesh->vertexStride_, mesh->indexCapacity_,
                         mesh->indexType_ == VK_INDEX_TYPE_UINT16 ? "u16" : "u32",

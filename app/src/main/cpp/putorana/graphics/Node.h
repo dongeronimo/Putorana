@@ -4,6 +4,7 @@
 #include "Camera.h"
 #include "Light.h"
 #include "Renderable.h"
+#include "SpaceChunk.h"
 
 #include <glm/glm.hpp>
 #include <glm/gtc/quaternion.hpp>
@@ -114,6 +115,24 @@ public:
      * where the light's position and direction come from; see Light.h.
      * */
     std::unique_ptr<Light> light;
+
+    /**
+     * Present means this node is one chunk of reconstructed space, and holds
+     * which chunk. See SpaceChunk.h.
+     *
+     * optional rather than unique_ptr for the same reason renderable is: it is a
+     * concrete, final, small value type, so it sits inline with no allocation
+     * and no indirection. There will be one of these per chunk and a room is
+     * hundreds of chunks, which makes that difference worth having.
+     *
+     * The node's transform is not incidental here. Chunk mesh vertices are
+     * CHUNK LOCAL — the reconstruction subtracts the chunk origin on the way out
+     * — so this node's position is what puts the geometry back in the world, and
+     * it keeps vertex floats small near zero instead of tens of metres out where
+     * a float32 mantissa starts eating the sub-millimetre detail marching cubes
+     * worked to produce.
+     * */
+    std::optional<SpaceChunk> spaceChunk;
 
     // --- transform --------------------------------------------------------
 

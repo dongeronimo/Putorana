@@ -126,6 +126,7 @@ add_library(${CMAKE_PROJECT_NAME} SHARED
         putorana/graphics/ArCamera.cpp
         putorana/graphics/Camera.cpp
         putorana/graphics/CameraFeed.cpp
+        putorana/graphics/ChunkMaterial.cpp
         putorana/graphics/DescriptorPool.cpp
         putorana/graphics/Device.cpp
         putorana/graphics/FinalPass.cpp
@@ -145,7 +146,6 @@ add_library(${CMAKE_PROJECT_NAME} SHARED
         putorana/graphics/PerspectiveCamera.cpp
         putorana/graphics/PhysicalDevice.cpp
         putorana/graphics/Renderable.cpp
-        putorana/recon/Unproject.cpp
         putorana/graphics/ShaderModule.cpp
         putorana/graphics/Swapchain.cpp
         putorana/graphics/World.cpp
@@ -222,6 +222,12 @@ target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE
 # Eigen, and that is nobody else's business in this build.
 add_subdirectory(third_party/open_chisel)
 
+# putorana::recon. Its own library, not sources above, because its translation
+# units are the only ones allowed to include <open_chisel/...> and they must all
+# be built with the NDEBUG and -O3 that Eigen needs. See
+# putorana/recon/CMakeLists.txt.
+add_subdirectory(putorana/recon)
+
 # Specifies libraries CMake should link to your target library. You
 # can link libraries from various origins, such as libraries defined in this
 # build script, prebuilt third-party libraries, or Android system libraries.
@@ -230,7 +236,10 @@ target_link_libraries(${CMAKE_PROJECT_NAME}
         android
         arcore::sdk_c
         assimp::assimp
-        open_chisel
+        # Not open_chisel directly: it is reached only through putorana_recon,
+        # which is what keeps Eigen and its build flags on the far side of that
+        # boundary. Linking it here as well would let any TU include its headers.
+        putorana_recon
         ${jnigraphics-lib}
         ${camera2ndk-lib}
         ${mediandk-lib}

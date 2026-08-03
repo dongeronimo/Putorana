@@ -288,7 +288,7 @@ const MaterialPipeline* MeshPass::PipelineFor(const Material& material, VertexFo
                             "material '%s' failed to build a pipeline for %s meshes; its draws "
                             "will be skipped",
                             key.materialType.name(),
-                            format == VertexFormat::Skinned ? "skinned" : "static");
+                            VertexFormatName(format));
     }
     // Cached even when it failed, so the log above happens once rather than
     // every frame.
