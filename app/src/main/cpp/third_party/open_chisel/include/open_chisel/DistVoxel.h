@@ -59,20 +59,66 @@ namespace chisel
             inline float GetWeight() const { return weight; }
             inline void SetWeight(const float& w) { weight = w; }
 
-            inline void Integrate(const float& distUpdate, const float& weightUpdate)
+            // LOCAL MODIFICATION: optional weight ceiling.
+            //
+            // maxWeight <= 0 keeps upstream behaviour exactly, which is an
+            // unbounded running mean. That is correct for a static scene and
+            // wrong for one that changes: a voxel observed three hundred times
+            // has weight 300, so a new observation moves it by 1/301 and the
+            // reconstruction cannot be corrected by fresh evidence at all.
+            //
+            // Only the STORED weight is clamped. The distance still uses the
+            // true running mean for this update, which is what keeps the value
+            // a distance in metres rather than a decayed approximation of one.
+            inline void Integrate(const float& distUpdate, const float& weightUpdate,
+                                  const float& maxWeight = 0.0f)
             {
                 float oldSDF = GetSDF();
                 float oldWeight = GetWeight();
                 float newDist = (oldWeight * oldSDF + weightUpdate * distUpdate) / (weightUpdate + oldWeight);
+                float newWeight = oldWeight + weightUpdate;
+                if (maxWeight > 0.0f && newWeight > maxWeight)
+                {
+                    newWeight = maxWeight;
+                }
                 SetSDF(newDist);
-                SetWeight(oldWeight + weightUpdate);
+                SetWeight(newWeight);
 
             }
 
-            inline void Carve()
+            // LOCAL MODIFICATION: carving decays the belief instead of voting
+            // against it.
+            //
+            // Upstream is `Integrate(0.0, 1.5)`, and it cannot remove a surface.
+            // Two independent reasons, either of which alone is fatal:
+            //
+            //   1. Integrate ADDS to the weight. A voxel at weight 200 moves by
+            //      1.5/201.5, under one percent, and comes out heavier than it
+            //      went in. Every carve makes the next one weaker.
+            //   2. It pulls the SDF toward ZERO, which is the surface, not free
+            //      space. The eligibility test upstream only admits voxels whose
+            //      SDF is already at or below zero, so carving walks them
+            //      asymptotically up to 0 from below and the sign never flips.
+            //      Marching cubes keys on sign changes, so the triangle stays.
+            //
+            // Observing free space is evidence AGAINST what this voxel holds,
+            // not a competing measurement of it. So the accumulated weight is
+            // decayed, and once it falls below the floor the voxel is Reset to
+            // unobserved: sdf 99999, weight 0. ChunkManager treats weight below
+            // 1e-15 as unobserved and skips the whole cube, so that is what
+            // actually deletes the geometry.
+            //
+            // decay is per observation. At 30 fps, 0.85 removes a voxel carried
+            // at weight 200 in about a second of looking at where it used to be.
+            inline void Carve(const float& decay, const float& minWeight)
             {
-                //Reset();
-                Integrate(0.0, 1.5);
+                const float decayed = GetWeight() * decay;
+                if (decayed <= minWeight)
+                {
+                    Reset();
+                    return;
+                }
+                SetWeight(decayed);
             }
 
             inline void Reset()

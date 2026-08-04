@@ -102,9 +102,53 @@ struct Config {
     /** Numerator of w = weight / (2 * tau). */
     float weight = 1.0f;
 
-    /** Space carving: clear voxels seen THROUGH. Costs time, removes ghosts. */
-    bool carvingEnabled = false;
+    /**
+     * Ceiling on a voxel's accumulated weight. 0 means unbounded.
+     *
+     * Unbounded is what upstream does and it is wrong for a scene that changes.
+     * A voxel observed three hundred times sits at weight 300, so a fresh
+     * observation moves it by 1/301 and the reconstruction can no longer be
+     * corrected by new evidence.
+     *
+     * 200 was chosen against the arithmetic of what one observation is now
+     * worth, and that arithmetic is the thing to recheck if this is ever
+     * changed. With per-pixel confidence weights one observation contributes at
+     * most 1.0, so 200 is roughly seven seconds of continuous full-confidence
+     * viewing. A previous attempt at this used 100 while one observation was
+     * contributing 8.33 (weight / 2*tau, with tau constant at 0.06), which
+     * saturated a voxel in twelve frames and made the surface flicker.
+     *
+     * This is NOT the noise control. A high ceiling means more averaging and a
+     * smoother surface; the ceiling exists so that removal and correction stay
+     * possible at all.
+     * */
+    float maxWeight = 200.0f;
+
+    /**
+     * Space carving: clear voxels the sensor has now seen THROUGH.
+     *
+     * On, and it was off until the mechanism was fixed. Upstream's carve could
+     * not remove a surface for two independent reasons, both documented in
+     * DistVoxel::Carve. What runs now decays the voxel's accumulated weight and
+     * Resets it to unobserved once that falls below the floor, which is the
+     * state ChunkManager skips when meshing.
+     *
+     * carvingDecay is per observation. At 30 fps, 0.85 clears a voxel carried at
+     * weight 200 in about a second of looking at where it used to be:
+     * 0.85^n * 200 < 0.5 needs n = 37.
+     *
+     * carvingDistance is the DEAD ZONE above the integration band, not a
+     * threshold measured from the surface. Between the end of the band and this
+     * much further out, a voxel is neither fused nor eroded. That gap is what
+     * stops a voxel on the boundary from being integrated one frame and carved
+     * the next as depth noise crosses the line, which showed up on the device as
+     * geometry flickering with nothing moving. Larger means slower removal and
+     * steadier geometry, and that trade is the whole point of the number.
+     * */
+    bool carvingEnabled = true;
     float carvingDistance = 0.05f;
+    float carvingDecay = 0.85f;
+    float carvingMinWeight = 0.5f;
 
     /**
      * Confidence below which a depth sample is thrown away outright, 0-255.
@@ -136,16 +180,38 @@ struct Config {
 
     /**
      * The weight the LEAST confident surviving sample gets, relative to 1.0 for
-     * a fully confident one. Weight is linear in confidence between the two.
+     * a fully confident one.
      *
      * Not zero, and that is the whole design. A sample at confidence 40 is worth
      * far less than one at 240, but it is worth much more than nothing when it
-     * is the only observation of that patch of floor -- and a TSDF fuses by
+     * is the only observation of that patch of floor, and a TSDF fuses by
      * weighted average, so a small weight is exactly the way to say "use this
      * unless something better turns up". Zero here reduces the mechanism back to
      * the gate that produced the disconnected islands.
      * */
     float confidenceWeightFloor = 0.05f;
+
+    /**
+     * Shape of the curve between that floor and 1.0, as an exponent on the
+     * normalised confidence. 1.0 is a straight line; higher is convex, pushing
+     * weak samples down hard while leaving confident ones near 1.
+     *
+     * 2.0 rather than 1.0 because the confidence distribution turned out to be
+     * BIMODAL once it was measured. Roughly 40% of samples land in the bottom
+     * bucket and 34% in the top, with the six buckets between them holding 3% to
+     * 6% each. A straight line spends nearly its whole range on that thin middle
+     * and separates the two modes by only about 5.5x, so six weak samples
+     * outvote one good one. Squaring takes the separation to about 13.5x without
+     * moving the confident end:
+     *
+     *     confidence 60  ->  linear 0.17,  squared 0.065
+     *     confidence 240 ->  linear 0.94,  squared 0.88
+     *
+     * The case this is aimed at is a patch receiving BOTH kinds of sample,
+     * mostly weak with the occasional good one. A patch that only ever receives
+     * weak samples is still reconstructed from them, which is the intent.
+     * */
+    float confidenceWeightExponent = 2.0f;
 
     /**
      * Depth range to trust, in metres.

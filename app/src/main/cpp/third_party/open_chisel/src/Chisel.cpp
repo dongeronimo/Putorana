@@ -178,7 +178,7 @@ namespace chisel
                   {
                       if (distVoxel.GetWeight() > 0 && distVoxel.GetSDF() < 0.0f)
                       {
-                          distVoxel.Carve();
+                          distVoxel.Carve(0.85f, 0.5f);
                           updated[chunk->GetID()] = true;
                       }
                   }

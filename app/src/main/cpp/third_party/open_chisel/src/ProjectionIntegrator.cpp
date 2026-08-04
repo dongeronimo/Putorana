@@ -101,7 +101,7 @@ namespace chisel
                 {
                     if (distVoxel.GetWeight() > 0 && distVoxel.GetSDF() < 0.0f)
                     {
-                        distVoxel.Carve();
+                        distVoxel.Carve(carvingDecay, carvingMinWeight);
                         updated = true;
                     }
                 }

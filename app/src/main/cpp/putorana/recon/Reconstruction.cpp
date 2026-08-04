@@ -119,6 +119,23 @@ struct Reconstruction::Impl {
     uint32_t emptyFrames = 0;
 
     /**
+     * Chunks that held a surface and then lost it. Cumulative.
+     *
+     * Kept, but it answers a coarser question than it looks like it does. A
+     * chunk is 64 cm and an object sitting on a table shares its chunk with the
+     * table, so removing the object can never empty it. This going nowhere is
+     * NOT evidence that carving is idle, which is exactly the mistake it caused
+     * the first time it was read. The voxel counters below are the ones that
+     * answer that.
+     * */
+    uint32_t chunksEmptied = 0;
+
+    /** Per-voxel carving outcomes, accumulated over the timing window. */
+    uint64_t carvedVoxels = 0;
+    uint64_t clearedVoxels = 0;
+    uint64_t nearFrontVoxels = 0;
+
+    /**
      * Where a frame's depth samples went, and how confident the ones that
      * existed were. Both accumulate over the timing window below.
      *
@@ -197,6 +214,8 @@ std::unique_ptr<Reconstruction> Reconstruction::Create(const Config& config, std
     impl.integrator.SetWeighter(chisel::Weighter(config.weight));
     impl.integrator.SetCarvingDist(config.carvingDistance);
     impl.integrator.SetCarvingEnabled(config.carvingEnabled);
+    impl.integrator.SetCarvingDecay(config.carvingDecay, config.carvingMinWeight);
+    impl.integrator.SetMaxWeight(config.maxWeight);
 
     impl.camera.SetNearPlane(config.nearPlane);
     impl.camera.SetFarPlane(config.farPlane);
@@ -204,14 +223,16 @@ std::unique_ptr<Reconstruction> Reconstruction::Create(const Config& config, std
     __android_log_print(ANDROID_LOG_INFO, kLogTag,
                         "RECONPROBE reconstruction ready: %d^3 voxels per chunk at %.3f m "
                         "(%.2f m chunks), truncation |%.3g d^2 + %.3g d + %.3g| * %.3g, "
-                        "carving %s, depth [%.2f, %.2f] m, confidence gate %u/255 then "
-                        "weight %.2f..1.00",
+                        "carving %s (decay %.2f per observation, floor %.2f), max weight %.0f, "
+                        "depth [%.2f, %.2f] m, confidence gate %u/255 then weight "
+                        "%.2f..1.00 to the power %.1f",
                         config.chunkVoxels, config.voxelMetres,
                         config.chunkVoxels * config.voxelMetres, config.truncationQuadratic,
                         config.truncationLinear, config.truncationConstant, config.truncationScale,
-                        config.carvingEnabled ? "on" : "off", config.nearPlane, config.farPlane,
-                        static_cast<unsigned>(config.confidenceThreshold),
-                        config.confidenceWeightFloor);
+                        config.carvingEnabled ? "on" : "off", config.carvingDecay,
+                        config.carvingMinWeight, config.maxWeight, config.nearPlane,
+                        config.farPlane, static_cast<unsigned>(config.confidenceThreshold),
+                        config.confidenceWeightFloor, config.confidenceWeightExponent);
     return reconstruction;
 }
 
@@ -258,14 +279,24 @@ void Reconstruction::Integrate(const ar::DepthImage& depth, const ar::CameraPose
     // are being handed: the automatic one fills in every pixel and would read
     // ~100% valid, while raw is documented as sparse. If this comes back at 100%
     // the acquire call is still the smoothed one.
-    // Confidence 0-255 to an integration weight in [floor, 1], linear over the
-    // range that SURVIVES the threshold rather than over the whole 0-255 span.
-    // That is what makes confidenceWeightFloor mean what its name says: the
-    // weakest sample actually fused gets exactly it.
+    // Confidence 0-255 to an integration weight in [floor, 1], over the range
+    // that SURVIVES the threshold rather than over the whole 0-255 span. That is
+    // what makes confidenceWeightFloor mean what its name says: the weakest
+    // sample actually fused gets exactly it.
+    //
+    // The curve is t^exponent, and the exponent is there because the confidence
+    // distribution is bimodal. See Config::confidenceWeightExponent.
     float* weightOut = impl.weights->GetMutableData();
     const float weightFloor = std::clamp(impl.config.confidenceWeightFloor, 0.0f, 1.0f);
+    const float weightRange = 1.0f - weightFloor;
     const float confidenceBase = static_cast<float>(impl.config.confidenceThreshold);
     const float confidenceSpan = std::max(255.0f - confidenceBase, 1.0f);
+    // Squaring is the configured default and std::pow for it would be 14400
+    // libm calls a frame for a multiply. The branch is uniform across the whole
+    // image, so it predicts perfectly.
+    const float weightExponent = impl.config.confidenceWeightExponent;
+    const bool squaredCurve = weightExponent == 2.0f;
+    const bool linearCurve = weightExponent == 1.0f;
 
     uint32_t validSamples = 0;
     uint32_t rejectedSamples = 0;
@@ -350,13 +381,16 @@ void Reconstruction::Integrate(const ar::DepthImage& depth, const ar::CameraPose
             // upstream's behaviour and the right fallback: absent is "no
             // opinion", and a device that will not tell us has not told us the
             // samples are bad.
-            const float weight =
-                    confidenceRow != nullptr
-                            ? weightFloor + (1.0f - weightFloor) *
-                                                    ((static_cast<float>(confidenceRow[column]) -
-                                                      confidenceBase) /
-                                                     confidenceSpan)
-                            : 1.0f;
+            float weight = 1.0f;
+            if (confidenceRow != nullptr) {
+                const float t =
+                        (static_cast<float>(confidenceRow[column]) - confidenceBase) /
+                        confidenceSpan;
+                const float shaped = squaredCurve ? t * t
+                                     : linearCurve ? t
+                                                   : std::pow(t, weightExponent);
+                weight = weightFloor + weightRange * shaped;
+            }
             weightDestination[column] = weight;
             weightSum += weight;
             ++validSamples;
@@ -396,10 +430,14 @@ void Reconstruction::Integrate(const ar::DepthImage& depth, const ar::CameraPose
     impl.camera.SetWidth(depth.width);
     impl.camera.SetHeight(depth.height);
 
+    impl.integrator.ResetVoxelCounters();
     const auto integrateBegan = std::chrono::steady_clock::now();
     impl.chisel->IntegrateDepthScan<float>(impl.integrator, impl.depth, ToExtrinsic(pose),
                                            impl.camera);
     const auto integrateEnded = std::chrono::steady_clock::now();
+    impl.carvedVoxels += impl.integrator.GetCarvedVoxels();
+    impl.clearedVoxels += impl.integrator.GetClearedVoxels();
+    impl.nearFrontVoxels += impl.integrator.GetNearFrontVoxels();
 
     // --- the one number that says where the frame went ---
     //
@@ -424,7 +462,8 @@ void Reconstruction::Integrate(const ar::DepthImage& depth, const ar::CameraPose
                             "RECONPROBE integrate %.1f ms mean over %u frames; %u chunks held, "
                             "%u awaiting remesh; last frame %u fused at mean weight %.2f / "
                             "%u below confidence %u / %u out of [%.1f, %.1f] m, "
-                            "furthest accepted %.2f m; %u frames skipped as empty",
+                            "furthest accepted %.2f m; %u frames skipped as empty; "
+                            "%u chunks emptied by carving so far",
                             meanMillis, impl.integrationsInWindow,
                             static_cast<uint32_t>(
                                     impl.chisel->GetChunkManager().GetChunks().size()),
@@ -435,7 +474,7 @@ void Reconstruction::Integrate(const ar::DepthImage& depth, const ar::CameraPose
                             static_cast<unsigned>(impl.config.confidenceThreshold),
                             rejectedSamples,
                             impl.config.nearPlane, impl.config.farPlane, observedMax,
-                            impl.emptyFrames);
+                            impl.emptyFrames, impl.chunksEmptied);
         __android_log_print(ANDROID_LOG_INFO, kLogTag,
                             "RECONPROBE depth budget over the window: %.0f%% of samples had NO "
                             "estimate at all (%u of %u). Those are pixels ARCore's stereo could "
@@ -460,8 +499,30 @@ void Reconstruction::Integrate(const ar::DepthImage& depth, const ar::CameraPose
                     static_cast<unsigned>(impl.config.confidenceThreshold));
         }
 
+        // The carving verdict, per voxel rather than per chunk.
+        //
+        //   carved 0            the branch is not being reached at all
+        //   carved high,        it is reaching voxels but not finishing them,
+        //     cleared 0         so the decay or the weight ceiling is the issue
+        //   nearFront high      the voxels in front of the surface are inside
+        //     with carved low   the truncation band and are being integrated
+        //                       instead, which no carving parameter can fix
+        __android_log_print(ANDROID_LOG_INFO, kLogTag,
+                            "RECONPROBE carving over the window: %llu voxels decayed, %llu of "
+                            "them cleared to unobserved; %llu more were in front of a surface "
+                            "but inside the truncation band (%.3f m) and were integrated "
+                            "instead of carved",
+                            static_cast<unsigned long long>(impl.carvedVoxels),
+                            static_cast<unsigned long long>(impl.clearedVoxels),
+                            static_cast<unsigned long long>(impl.nearFrontVoxels),
+                            impl.config.truncationConstant +
+                                    2.0f * 1.7320508f * impl.config.voxelMetres);
+
         impl.integrateNanosTotal = 0;
         impl.integrationsInWindow = 0;
+        impl.carvedVoxels = 0;
+        impl.clearedVoxels = 0;
+        impl.nearFrontVoxels = 0;
         impl.noEstimateSamples = 0;
         impl.histogramSamples = 0;
         impl.windowSamples = 0;
@@ -563,6 +624,12 @@ uint32_t Reconstruction::Remesh(uint32_t maxChunks) {
             // never existed.
             if (impl.live.erase(id) > 0) {
                 impl.removed.push_back(ToChunkKey(id));
+                // The one direct measurement that carving is working. A chunk
+                // only lands here by having held a surface and then losing it,
+                // which is exactly what should happen when the sensor looks at
+                // where something used to be. It stayed at zero for as long as
+                // Carve could not remove anything.
+                ++impl.chunksEmptied;
             }
             continue;
         }

@@ -62,7 +62,39 @@ namespace chisel
                 Eigen::Vector3i numVoxels = chunk->GetNumVoxels();
                 float resolution = chunk->GetVoxelResolutionMeters();
                 Vec3 origin = chunk->GetOrigin();
-                float diag = 2.0 * sqrt(3.0f) * resolution;
+                // LOCAL MODIFICATION: half a voxel diagonal, not two of them.
+                //
+                // Upstream is `2.0 * sqrt(3) * resolution`, which at 4 cm voxels
+                // is 0.1386 m of padding on a configured truncation of 0.06. The
+                // band that actually gets integrated came out at +-0.1986, more
+                // than three times the truncation that was asked for.
+                //
+                // The padding exists because the test below is on the voxel
+                // CENTRE while the voxel has extent. The furthest any part of a
+                // voxel sits from its centre is half a diagonal,
+                // sqrt(3)/2 * resolution = 0.0346 m here, so that is the value
+                // the geometry justifies. Upstream used four times it.
+                //
+                // This is also what made carving unreachable. The carve branch
+                // below is an `else if`, so it cannot fire until surfaceDist
+                // exceeds truncation + diag, and carvingDist (0.05) was smaller
+                // than diag (0.1386). The configured carving distance therefore
+                // did nothing at all, and raising it could only ever push the
+                // start of carving further away. With the padding at 0.0346 the
+                // carve threshold becomes truncation + carvingDist for real, and
+                // an object removed from a table stops being permanently inside
+                // the band of the table behind it.
+                //
+                // Second effect, and it is a bonus rather than the goal: fewer
+                // voxels pass the test, so integration touches less per frame.
+                //
+                // Half a diagonal is the value the geometry justifies and it was
+                // MEASURED TOO SMALL on the device: the surface came back shot
+                // through with holes, because marching cubes needs all eight
+                // corners of a cube observed and a band that thin leaves too
+                // many of them outside it. One full diagonal is the setting that
+                // holds, and it is still half of upstream's.
+                float diag = 1.0 * sqrt(3.0f) * resolution;
                 Vec3 voxelCenter;
                 bool updated = false;
                 for (size_t i = 0; i < centroids.size(); i++)
@@ -123,21 +155,87 @@ namespace chisel
                         if (weight > 0.0f)
                         {
                             DistVoxel& voxel = chunk->GetDistVoxelMutable(i);
-                            voxel.Integrate(surfaceDist, weight);
+
+                            // Counted, not acted on, and the count is the point.
+                            //
+                            // This voxel is in FRONT of the measured surface but
+                            // still inside the truncation band, so it lands here
+                            // rather than in the carving branch below and is
+                            // pushed toward positive slowly instead of being
+                            // erased. The two branches do not partition the way
+                            // the configuration suggests: carvingDist is 0.05
+                            // and truncation is 0.06, but this branch tests
+                            // against truncation + diag, and diag is 0.1386 at
+                            // 4 cm voxels. Everything nearer than 0.1986 m in
+                            // front of a surface is integrated, never carved.
+                            //
+                            // Which means an object THINNER than that cannot be
+                            // carved away when it is removed, because whatever
+                            // was behind it is still inside the band. Telling
+                            // that apart from "carving is not firing" is what
+                            // this counter is for.
+                            if (surfaceDist > 0.0f && voxel.GetWeight() > 0.0f)
+                            {
+                                ++nearFrontVoxels;
+                            }
+
+                            voxel.Integrate(surfaceDist, weight, maxWeight);
                             updated = true;
                         }
                     }
-                    else if (enableVoxelCarving && surfaceDist > truncation + carvingDist)
+                    else if (enableVoxelCarving && surfaceDist > truncation + diag + carvingDist)
                     {
+                        // This voxel sits well in FRONT of the measured surface:
+                        // the ray passed through it and hit something further
+                        // away, so it was observed to be empty.
+                        //
+                        // LOCAL MODIFICATION: `+ diag`, which turns carvingDist
+                        // into a DEAD ZONE above the integration band rather
+                        // than a threshold competing with it.
+                        //
+                        // Upstream tests against truncation + carvingDist while
+                        // the branch above tests against truncation + diag, and
+                        // this is an else-if. Two consequences, both bad. When
+                        // carvingDist is the smaller of the two, which it was,
+                        // the whole parameter is inert and carving silently
+                        // starts wherever the integration band happens to end.
+                        // And the two branches then share an exact boundary, so
+                        // a voxel sitting on it flips between being integrated
+                        // and being carved from frame to frame as depth noise
+                        // crosses the line. That was visible on the device as
+                        // geometry flickering with no object moving.
+                        //
+                        // Written this way there is a band of carvingDist metres
+                        // where a voxel is neither fused nor eroded, and nothing
+                        // can oscillate across it in one frame of noise. It also
+                        // makes the parameter monotone in the direction its name
+                        // implies: larger means carving starts further from the
+                        // surface, which is slower removal and steadier
+                        // geometry. That trade is the reason it exists.
+                        //
+                        // LOCAL MODIFICATION: upstream also required
+                        // `voxel.GetSDF() < 1e-5` here, which admits only voxels
+                        // already at or behind a surface. That is the wrong half
+                        // of the population. A voxel sitting just in front of an
+                        // object that has been taken away carries a small
+                        // POSITIVE SDF and never qualified, so the near face of
+                        // a removed object was structurally uncarvable.
+                        //
+                        // The weight test stays, because a voxel that was never
+                        // observed has nothing to carve and Reset would be a
+                        // write for no reason.
                         DistVoxel& voxel = chunk->GetDistVoxelMutable(i);
-                        if (voxel.GetWeight() > 0 && voxel.GetSDF() < 1e-5)
+                        if (voxel.GetWeight() > 0.0f)
                         {
-                            voxel.Carve();
+                            voxel.Carve(carvingDecay, carvingMinWeight);
+                            ++carvedVoxels;
+                            if (voxel.GetWeight() <= 0.0f)
+                            {
+                                ++clearedVoxels;
+                            }
                             updated = true;
                         }
                     }
-
-
                 }
                 return updated;
             }
@@ -207,7 +305,7 @@ namespace chisel
                             DistVoxel& voxel = chunk->GetDistVoxelMutable(i);
                             if (voxel.GetWeight() > 0 && voxel.GetSDF() < 1e-5)
                             {
-                                voxel.Carve();
+                                voxel.Carve(carvingDecay, carvingMinWeight);
                                 updated = true;
                             }
                         }
@@ -249,6 +347,50 @@ namespace chisel
             inline void SetWeights(const std::shared_ptr<const DepthImage<float> >& w) { weights = w; }
             inline void ClearWeights() { weights.reset(); }
 
+            /**
+             * LOCAL ADDITION: ceiling on accumulated per-voxel weight. 0 keeps
+             * upstream's unbounded running mean. See DistVoxel::Integrate.
+             * */
+            inline float GetMaxWeight() const { return maxWeight; }
+            inline void SetMaxWeight(float value) { maxWeight = value; }
+
+            /**
+             * LOCAL ADDITION: what one observation of free space does to a
+             * voxel's accumulated weight, and the floor at which it is Reset to
+             * unobserved. See DistVoxel::Carve.
+             * */
+            inline void SetCarvingDecay(float decay, float minWeight)
+            {
+                carvingDecay = decay;
+                carvingMinWeight = minWeight;
+            }
+
+            /**
+             * LOCAL ADDITION: where the voxels in front of a surface went, since
+             * the last ResetVoxelCounters.
+             *
+             *   carved       decayed by the carving branch
+             *   cleared      of those, the ones that reached weight 0 and are
+             *                now unobserved, which is what deletes geometry
+             *   nearFront    in front of the surface but inside the truncation
+             *                band, so integrated rather than carved
+             *
+             * Plain counters rather than atomics, and that is safe only because
+             * integration is single-threaded here: parallel_for is inert at the
+             * chunk counts this runs at, and the one call site that fans out is
+             * IntegrateDepthScanColor, which this project does not use. If that
+             * ever changes these have to change with it.
+             * */
+            inline uint32_t GetCarvedVoxels() const { return carvedVoxels; }
+            inline uint32_t GetClearedVoxels() const { return clearedVoxels; }
+            inline uint32_t GetNearFrontVoxels() const { return nearFrontVoxels; }
+            inline void ResetVoxelCounters() const
+            {
+                carvedVoxels = 0;
+                clearedVoxels = 0;
+                nearFrontVoxels = 0;
+            }
+
         protected:
             Truncator truncator;
             Weighter weighter;
@@ -256,6 +398,15 @@ namespace chisel
             bool enableVoxelCarving;
             Vec3List centroids;
             std::shared_ptr<const DepthImage<float> > weights;
+            float maxWeight = 0.0f;
+            float carvingDecay = 0.85f;
+            float carvingMinWeight = 0.5f;
+
+            // Mutable so Integrate can stay const. See the accessors above for
+            // why unsynchronised counters are safe in this configuration.
+            mutable uint32_t carvedVoxels = 0;
+            mutable uint32_t clearedVoxels = 0;
+            mutable uint32_t nearFrontVoxels = 0;
     };
 
 } // namespace chisel 

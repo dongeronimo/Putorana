@@ -206,6 +206,66 @@ rest marked. `putorana::recon::Reconstruction::Remesh` does that, and its
 `README.md` documents the starvation bug that the obvious implementation of it
 contains.
 
+### 6. Space carving rebuilt, because upstream's cannot remove anything
+
+`DistVoxel.h`, `ProjectionIntegrator.h`.
+
+Space carving is one of the things the CHISEL paper contributes over plain
+KinectFusion. In the reference implementation it cannot delete a surface, for
+four independent reasons. Any one of them alone is enough.
+
+```cpp
+inline void Carve() { Integrate(0.0, 1.5); }
+```
+
+**It adds weight to the voxel it is erasing.** `Integrate` accumulates, so a
+voxel at weight 200 moves by 1.5/201.5, under one percent, and comes out heavier
+than it went in. Every attempt makes the next one weaker.
+
+**It pulls the SDF toward zero, which is the surface, not free space.** Combined
+with the eligibility test below, which only admits voxels already at or behind a
+surface, carving walks them asymptotically up to 0 from underneath and the sign
+never flips. Marching cubes keys on sign changes, so the triangle stays.
+
+```cpp
+if (voxel.GetWeight() > 0 && voxel.GetSDF() < 1e-5)
+```
+
+**That test is the wrong half of the population.** A voxel just in front of an
+object that has been taken away carries a small positive SDF and never qualifies,
+so the near face of anything removed is structurally uncarvable.
+
+**And the branch is unreachable at the configured distance.** Carving is an
+`else if` after a test on `truncation + diag`, where `diag` is `2*sqrt(3)*res`.
+At 4 cm voxels that is 0.1386 against a configured `carvingDist` of 0.05, so the
+parameter is inert and carving silently begins wherever the integration band
+happens to end. Raising `carvingDist` could only push the start further out.
+
+What runs here instead:
+
+  * `Carve(decay, minWeight)` **decays** the accumulated weight and `Reset`s the
+    voxel to unobserved once it falls below the floor. Observing free space is
+    evidence against what a voxel holds, not a competing measurement of it.
+    `ChunkManager` treats weight below `1e-15` as unobserved and skips the whole
+    cube, so that is what actually deletes geometry.
+  * The SDF test is gone. The weight test stays, since an unobserved voxel has
+    nothing to carve.
+  * `diag` is **one** voxel diagonal rather than two. Half a diagonal is what the
+    geometry justifies, since the test is on the voxel centre, but it was
+    measured too small on the device: marching cubes needs all eight corners of a
+    cube observed and the surface came back full of holes. One diagonal holds.
+  * The carve test is `truncation + diag + carvingDist`, so `carvingDist` is a
+    **dead zone above the integration band** instead of a threshold competing
+    with it. Sharing an exact boundary made voxels on it flip between integrated
+    and carved as depth noise crossed the line, which was visible as geometry
+    flickering with nothing moving. The gap makes that impossible in one frame,
+    and makes the parameter monotone in the direction its name implies.
+
+`DistVoxel::Integrate` also takes an optional weight ceiling, defaulting to 0
+which is upstream's unbounded running mean. Unbounded means a voxel observed
+three hundred times cannot be corrected by fresh evidence at all, which is the
+other half of why nothing ever went away.
+
 ## Verified
 
 All 16 translation units compile clean, zero errors and zero failures, for
@@ -268,30 +328,6 @@ the next candidates to change. The rest are small.
 
     Note the related consequence: `minimum` also comes from the image, so the
     near plane moves with the data too.
-
-  * **`DistVoxel::Carve` strengthens the voxel it is trying to erase.**
-
-        inline void Carve() { Integrate(0.0, 1.5); }
-
-    `Integrate` pushes the SDF toward the new value **and adds to the accumulated
-    weight**. A voxel carrying weight 200 moves by 1.5/201.5, under one percent,
-    and comes out heavier than it went in. Every carving attempt makes the next
-    one weaker, so carving is asymptotically self-defeating. Objects removed from
-    the scene do not erode.
-
-    The eligibility test in `ProjectionIntegrator` has its own half of the
-    problem:
-
-        if (voxel.GetWeight() > 0 && voxel.GetSDF() < 1e-5)
-
-    Only voxels whose SDF is already below `1e-5` qualify, so a voxel sitting
-    just in front of a removed surface, with a small positive SDF, never carves
-    at all.
-
-    The fix is for `Carve` to decay the weight rather than out-vote it. That also
-    makes a generous weight cap safe, which is the other half of the same
-    problem: an uncapped weight means a voxel observed badly three hundred times
-    cannot be corrected by a good observation afterwards.
 
 Small, and worth revisiting once there is something running to measure:
 

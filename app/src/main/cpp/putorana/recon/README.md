@@ -122,9 +122,20 @@ Two of them are behavioural and cost real time:
   depth image**, ignoring the camera's configured far plane. Worked around in our
   conversion loop rather than fixed. See *"The far plane trap"* below, because
   anyone touching that loop needs to know why the clamp is there.
-- **`DistVoxel::Carve` increases the weight of the voxel it is erasing**, so
-  carving is asymptotically self-defeating and removed objects never fade.
-  Carving is switched off as a result.
+**4. Space carving could not remove anything.**
+`DistVoxel.h`, `ProjectionIntegrator.h`.
+
+Four independent reasons, any one of them sufficient: `Carve` added weight to the
+voxel it was erasing, it pulled the SDF toward the surface rather than toward
+free space, its eligibility test admitted only voxels already at or behind a
+surface, and the branch was unreachable at the configured distance because
+`carvingDist` was smaller than the padding the integration branch tests against.
+
+Carving now decays the accumulated weight and resets the voxel to unobserved,
+the padding is one voxel diagonal rather than two, and `carvingDist` is a dead
+zone above the integration band rather than a threshold competing with it. The
+fork's README has the full derivation. A weight ceiling came with it, since an
+unbounded running mean is the other reason nothing could ever be corrected.
 
 The small ones: `size_t` mesh indices feeding a `VK_INDEX_TYPE_UINT32` buffer,
 `shared_ptr<Chunk>` in the hash map putting an atomic refcount in every lookup,
@@ -1035,16 +1046,11 @@ of this ever needs revalidating.
 
 **Known wrong, in the order worth fixing:**
 
-1. **The weight curve does not match the confidence distribution.** The linear
-   ramp from 0.05 to 1.00 spends nearly its whole range on the six middle
-   histogram buckets, which hold about a quarter of the samples. A curve that
-   separates the two modes should be worth more than any truncation tuning. This
-   is the remaining lever against surface undulation.
-2. **Space carving is broken and switched off.** `DistVoxel::Carve` increases the
-   weight of the voxel it is trying to erase, so objects removed from the scene
-   do not erode. The fork's README has the analysis. Fixing it also makes a
-   weight cap safe, which is the other half of the same problem.
-3. **Truncation does not depend on distance.** `truncationQuadratic` and
+1. **Between 40% and 60% of samples arrive with no estimate at all**, and no
+   weighting scheme reaches a measurement that was never made. This is the
+   largest remaining hole in coverage and the one lever left on it is the
+   smoothed stream, discussed below.
+2. **Truncation does not depend on distance.** `truncationQuadratic` and
    `truncationLinear` are both zero, so tau is a constant 0.06 m at every range,
    while ARCore documents its depth error as growing quadratically with distance.
    Dynamic truncation is one of the things CHISEL contributes over plain
@@ -1057,6 +1063,32 @@ of this ever needs revalidating.
   refuses to mesh a chunk's outer voxel layer until `allNeighborsObserved`, so
   the edge of what has been seen always arrives as a zigzag. It resolves as the
   sweep continues.
+
+**Next: the smoothed stream as hole fill, and why the earlier argument does not
+forbid it.**
+
+Raw depth was chosen over the smoothed stream because ARCore has already fused
+the smoothed one temporally, so integrating it means averaging correlated data
+and converging on the smoothing instead of on the surface. That argument holds
+wherever raw depth exists. It says nothing about the 40% to 60% of pixels where
+raw depth does not exist, because there the alternative to a smoothed guess is
+not a better measurement, it is a hole.
+
+So the shape is: raw at its confidence weight where it has an estimate, smoothed
+at a low fixed weight only where raw is zero. The per-pixel weight image already
+built for the confidence map is the mechanism, and it costs one more acquisition
+rather than a session reconfiguration, since `AR_DEPTH_MODE_AUTOMATIC` exposes
+both.
+
+The reason this is the only lever worth pulling on coverage is the hardware.
+This device has **no depth sensor**, and neither do most Android phones now:
+Samsung dropped time of flight from its flagship line after the S20 Ultra era,
+and ARCore's Depth API works without one by running motion stereo on the single
+RGB camera. Depth here is computed, not measured. That is the direct cause of the
+bimodal confidence, of untextured surfaces returning zero rather than a poor
+value, and of the quadratic error growth. It is not a sensor that could be
+better, it is the absence of a sensor, so nothing in this pipeline can raise the
+ceiling. Only using more of what is already produced can.
 
 **What the current quality unlocks.** The surface is now good enough that the
 remaining noise can be attacked on the **mesh** rather than in the field.
