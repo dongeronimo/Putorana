@@ -2,10 +2,15 @@
 
 Turning what the camera measures into a surface we can draw and collide against.
 
-Nothing here yet but this document. That is deliberate: the arithmetic below has
-to be right before any of it is worth writing down as code, and every one of the
-mistakes it warns about produces a reconstruction that *looks* like a plausible
-room and is wrong.
+This document was written before any of the code was, because every mistake it
+warns about produces a reconstruction that *looks* like a plausible room and is
+wrong. Most of it still stands. The parts that a device settled are marked
+MEASURED, and the one question it left open has since been closed.
+
+It runs. On a Samsung SM-S731B: 30 fps, integration 19 ms with 111 chunks in
+view, marching cubes sharing vertices at 4.69x, 4 MiB of mesh for 64 chunk nodes.
+The story of how it got there, including the several changes that looked right
+and were not, is in `reconstruction-quality.md` at the repository root.
 
 ---
 
@@ -15,7 +20,7 @@ Two options were on the table: use OpenChisel, or write the algorithm ourselves.
 
 **The plan is OpenChisel now, and moving pieces of it onto compute shaders over
 time until there is nothing of it left.** That is not a compromise between the two
-options — it is a sequence. The library buys a working reconstruction to look at
+options. It is a sequence. The library buys a working reconstruction to look at
 and argue with; each piece that turns out to matter gets replaced deliberately,
 with the original still running beside it to check the replacement against. The
 alternative was writing all of it before seeing any of it work, and being unable
@@ -24,18 +29,18 @@ to tell a maths bug from a plumbing bug when the result looked wrong.
 OpenChisel is the reference implementation of the CHISEL paper (Klingensmith et
 al., RSS 2015), written for Google Tango. It was measured before choosing: the
 core library is **4814 lines across 16 .cpp files, depending only on Eigen and
-the STL** — no ROS, no PCL, despite the catkin packaging. It compiles clean for
-arm64-v8a under NDK 28 at `-std=c++17`, unmodified. It is MIT licensed.
+the STL**, with no ROS and no PCL, despite the catkin packaging. It compiles
+clean for arm64-v8a under NDK 28 at `-std=c++17`, unmodified. It is MIT licensed.
 
 ## What was wrong with it, and what we did about it
 
 The objections were real. They were also, every one of them, about 2014 C++
-rather than about the algorithm — which is why forking beat rejecting:
+rather than about the algorithm, which is why forking beat rejecting:
 
 - **Its memory layout was wrong for a phone.** `DistVoxel` had a *virtual
   destructor*, so on arm64 every voxel carried an 8-byte vtable pointer next to
   its 4-byte SDF and 4-byte weight: 16 bytes where 8 would do. `ColorVoxel` was
-  the same — 16 bytes to store 4 of RGBA. A voxel cost 32 bytes instead of 12,
+  the same, 16 bytes to store 4 of RGBA. A voxel cost 32 bytes instead of 12,
   and half of every cache line the integrator touched was vtable pointer. Nothing
   was ever used polymorphically through those pointers: the entire codebase
   contains exactly **three** inheritance relationships.
@@ -43,7 +48,7 @@ rather than about the algorithm — which is why forking beat rejecting:
   loop.** Their bodies are a handful of arithmetic operations, so the cost was
   not the dispatch but the inlining, hoisting and vectorisation it prevented.
   `QuadraticTruncator` computed its square as `pow(reading, 2)`, which behind a
-  virtual boundary could not be folded — squaring a float was a libm call, per
+  virtual boundary could not be folded, so squaring a float was a libm call, per
   voxel.
 
 Both are fixed in the fork at `third_party/open_chisel/`, whose README documents
@@ -51,13 +56,83 @@ every change and the measurements behind them. A voxel is now **12 bytes**, the
 library emits **no vtables at all**, and the compiled output contains no calls to
 `pow`.
 
-What is still wrong with it is listed there too, deliberately unfixed: `size_t`
-mesh indices feeding a `VK_INDEX_TYPE_UINT32` buffer, and Eigen where the rest of
-this project is GLM.
+### Where we diverged after it was running
+
+The two changes above were made before anything had been executed, on the
+strength of reading the code. The three below came out of watching it fail on a
+device, and each is a place where upstream's behaviour is not merely dated but
+wrong for what we are doing. They are listed here as well as in the fork's README
+because they are the reason the fork cannot be dropped for a fresh checkout.
+
+**1. Marching cubes emitted a triangle soup.**
+`MarchingCubes.h`, `MarchingCubes.cpp`, `ChunkManager.cpp`.
+
+Every triangle allocated three fresh vertices, so a vertex where six triangles
+meet was stored six times with six identical normals, and the index buffer
+carried nothing beyond `0, 1, 2, 3, ...`. Upstream asserts the property outright:
+`vertices.size() == indices.size()`.
+
+We now key each vertex on the **grid edge** it was interpolated on. The cube
+corner offsets plus the existing `edgeIndexPairs` give the axis and lower
+endpoint of any edge, which packs into a 64-bit key, so two cubes sharing an edge
+produce byte-identical keys. Keying on topology rather than on position is the
+part that matters: a position key needs an epsilon, and an epsilon on
+interpolated floats either merges vertices that should stay distinct or fails to
+merge ones that should not.
+
+Measured 4.08x to 4.69x fewer vertices for the same geometry, and mesh memory for
+a room fell from 17 MiB across 263 nodes to 4 MiB across 64.
+
+**2. The depth integration path ignored its own weighting policy.**
+`ProjectionIntegrator.h`.
+
+`ProjectionIntegrator::Integrate` passed a hardcoded `1.0f` as the weight. The
+`weighter` member is consulted only from `IntegrateColor`, which this app never
+calls, so a configured `Weighter` did nothing at all in the live path.
+
+Calling the weighter would fix the lie but not the need. ARCore ships a
+confidence map alongside raw depth, and its samples are not of equal quality. The
+weighter's signature, `GetWeight(surfaceDist, truncation)`, has nowhere to put a
+per-pixel quantity. So the integrator now takes an optional image of per-pixel
+weights, indexed at the same row and column the depth was read from. Null
+restores upstream behaviour exactly.
+
+Why weighting instead of filtering the depth map before handing it over: covered
+under *"Two ways to use it, and only one of them works"* below. The short version
+is that a hard threshold deletes floors.
+
+**3. Remeshing was all-or-nothing.**
+`Chisel.h`, `GetMutableMeshesToUpdate()`.
+
+Upstream's only way to remesh is `UpdateMeshes()`, which does every dirty chunk
+and then clears the set. Integration marks the whole 3x3x3 neighbourhood of every
+chunk it touches, so sweeping a room dirties hundreds at once and meshing all of
+them inside one frame is a dropped frame. Mutable access lets `Remesh` take a
+bounded number per frame and leave the rest marked.
+
+That change hands the caller a scheduling problem that upstream never had, and
+the obvious way to schedule it starves. See *"The remesh cycle"* below.
+
+### What is still wrong with it, deliberately
+
+Listed in the fork's README rather than fixed, so that the diff stays reviewable.
+Two of them are behavioural and cost real time:
+
+- **`Chisel::IntegrateDepthScan` builds its frustum from the maximum value in the
+  depth image**, ignoring the camera's configured far plane. Worked around in our
+  conversion loop rather than fixed. See *"The far plane trap"* below, because
+  anyone touching that loop needs to know why the clamp is there.
+- **`DistVoxel::Carve` increases the weight of the voxel it is erasing**, so
+  carving is asymptotically self-defeating and removed objects never fade.
+  Carving is switched off as a result.
+
+The small ones: `size_t` mesh indices feeding a `VK_INDEX_TYPE_UINT32` buffer,
+`shared_ptr<Chunk>` in the hash map putting an atomic refcount in every lookup,
+and Eigen where the rest of this project is GLM.
 
 `Threading.h::parallel_for` is *not* on that list, despite appearances. Its
 `threshold = 1000` default means it spawns no threads at all below ~1000 chunks
-in the frustum, which is where we operate — so the integrator is single-threaded
+in the frustum, which is where we operate, so the integrator is single-threaded
 today whether or not anyone intended it. The fork's README has the arithmetic.
 Worth knowing mainly so nobody spends an afternoon tuning a thread count that
 does nothing.
@@ -67,20 +142,21 @@ does nothing.
 Eigen is an expression-template library: unoptimised, every vector operation
 becomes a chain of real function calls instead of collapsing into a few
 instructions, and `eigen_assert` bounds-checks each access. A debug build of
-anything Eigen-heavy is not a bit slower, it is *categorically* slower — slow
+anything Eigen-heavy is not a bit slower, it is *categorically* slower. Slow
 enough that you stop being able to tell a performance bug from the debug build,
 which is how afternoons disappear.
 
 On Android we can do something about that which Windows does not allow: build
 this one library with full optimisation while the app around it stays debuggable.
 
-The reason the Windows intuition does not transfer is specific. There, debug and
-release are **different C runtimes** — different heaps, so memory allocated in one
-and freed in the other corrupts; and `_ITERATOR_DEBUG_LEVEL` changes the *layout*
-of standard containers, so a `std::vector` is not even the same type across the
-boundary. Both are ABI breaks. Android has one libc++ and one bionic allocator
-for the entire process, and optimisation level is not an ABI property. Mixing
-`-O0` and `-O3` translation units is ordinary there.
+The reason the Windows intuition does not transfer is specific. There, debug
+and release are **different C runtimes**, with different heaps, so memory
+allocated in one and freed in the other corrupts; and `_ITERATOR_DEBUG_LEVEL`
+changes the *layout* of standard containers, so a `std::vector` is not even the
+same type across the boundary. Both are ABI breaks. Android has one libc++ and
+one bionic allocator for the entire process, and optimisation level is not an
+ABI property.
+Mixing `-O0` and `-O3` translation units is ordinary there.
 
 The one real hazard is ODR, and it has a name: **`NDEBUG`**. Eigen turns `NDEBUG`
 into `EIGEN_NO_DEBUG` (`Macros.h:987`), which removes `eigen_assert` from inline
@@ -115,7 +191,7 @@ already.
 The root README's rule: *"Nothing may be loaded once and cached across
 surfaces."* The `Allocator` dies with the `Device`, and the `Device` dies **every
 time the app is backgrounded**. A voxel volume living in `VkDeviceMemory` would
-be destroyed every time the user presses Home — throwing away the reconstructed
+be destroyed every time the user presses Home, throwing away the reconstructed
 world, which is the one thing in this app that must survive. The workarounds are
 to re-upload the whole volume on every resume, or to keep a CPU mirror; and if
 there is a CPU mirror, the CPU version is already written.
@@ -124,11 +200,11 @@ there is a CPU mirror, the CPU version is already written.
 process scope because destroying the session throws away tracking. The voxel grid
 has the same property and belongs at the same level.
 
-The second reason is arithmetic. ARCore's depth map is small — **measured at
+The second reason is arithmetic. ARCore's depth map is small, **measured at
 160x90 on the device this was developed against**, up to 640x480 on some others.
 That is 14,400 samples per frame; at 20-40 voxels touched per ray, a few hundred
 thousand voxel updates. That is milliseconds on one arm64 core. The expensive part of a GPU implementation is not the
-integration kernel — it is dynamic chunk allocation on the GPU (a hash table with
+integration kernel. It is dynamic chunk allocation on the GPU (a hash table with
 atomics, a free list, garbage collection), which is where all the difficulty and
 all the bugs live, in exchange for speeding up the part that was never slow.
 
@@ -149,7 +225,7 @@ Everything below comes from `ar::CameraFrame`, in `putorana/ar/Subsystem.h`.
 `putorana::ar` follows: plain memory in, plain vertex arrays out, and
 `putorana::graphics` turns those into a `Mesh`.
 
-## Which pose — the trap this section exists for
+## Which pose, and the trap this section exists for
 
 ARCore hands out **two** poses, and they differ by a rotation about the view axis
 of a multiple of 90 degrees. Picking the wrong one does not make the
@@ -163,7 +239,7 @@ reconstruction subtly off. It lays the room on its side.
 | used by | `graphics::ArCamera` (rendering) | **this namespace** (reconstruction) |
 
 The rule that decides it: **the CPU image and its intrinsics are unrotated**, and
-ARCore says so in as many words — `ArCamera_getImageIntrinsics` returns "the
+ARCore says so in as many words. `ArCamera_getImageIntrinsics` returns "the
 unrotated and uncropped intrinsics for the image (CPU) stream", and the
 `AR_COORDINATES_2D_IMAGE_*` spaces are documented as the CPU image while the
 `VIEW` ones are explicitly "display-rotated". Pixels that were never rotated must
@@ -177,16 +253,15 @@ needs fixing.
 
 The two halves of the app ask **inverse questions**:
 
-- Rendering asks *"where on screen does this 3D point land?"* — 3D → 2D. ARCore
-  answers it with a finished `projection` matrix. The intrinsics are already
-  inside that matrix; that is what a projection matrix *is*. They are absent from
-  the render path because they are already there, in matrix form.
-- Reconstruction asks the opposite: *"this pixel reads 2.3m — where in 3D is
-  that?"* — 2D → 3D. That is the inverse of a projection, it cannot be done with
-  a projection matrix that has already discarded depth, and it operates on a
-  **different image** (the depth map, unrotated) under a **different rotation
-  convention**.
-
+- Rendering asks *"where on screen does this 3D point land?"*, which is 3D to
+  2D. ARCore answers it with a finished `projection` matrix. The intrinsics are
+  already inside that matrix; that is what a projection matrix *is*. They are
+  absent from the render path because they are already there, in matrix form.
+- Reconstruction asks the opposite: *"this pixel reads 2.3m, where in 3D is
+  that?"*, which is 2D to 3D. That is the inverse of a projection, it cannot be
+  done with a projection matrix that has already discarded depth, and it
+  operates on a **different image** (the depth map, unrotated) under a
+  **different rotation convention**.
 So the two are not redundant descriptions of one camera. They are two operations,
 in opposite directions, on two images with two conventions.
 
@@ -204,7 +279,7 @@ range from 8191mm to 65535mm" in its deprecation notice means.)
 **The sample is Z, not range.** ARCore's wording: "the distance in millimeters
 along the camera principal axis". It is *not* the length of the ray from the
 optical centre to the point. This is the convenient case and the next section
-shows why — but code written for a time-of-flight sensor, which usually reports
+shows why. But code written for a time-of-flight sensor, which usually reports
 range, is wrong here in a way that bulges the reconstruction outward toward the
 frame edges while looking perfect at the centre.
 
@@ -229,42 +304,98 @@ const float d = mm * 0.001f;        // metres
 padded, which is exactly the kind of thing that works on the development device
 and not on the next one.
 
-### Automatic vs raw, and the confidence image we are not reading — OPEN
+### Automatic vs raw, and the confidence image: SETTLED
 
-There are two depth streams, and we currently read one of them.
+There are two depth streams. We read **raw**, together with its confidence map.
 
-| | **Automatic** (what we read) | **Raw** |
+| | **Automatic** | **Raw** (what we read) |
 |---|---|---|
 | call | `ArFrame_acquireDepthImage16Bits` | `ArFrame_acquireRawDepthImage16Bits` |
-| coverage | dense — every pixel has a value | sparse — 0 where ARCore is unsure |
+| coverage | dense, every pixel has a value | sparse, 0 where ARCore is unsure |
 | filtering | smoothed, temporally fused by ARCore | "mostly unfiltered" |
 | confidence | none | `ArFrame_acquireRawDepthConfidenceImage` |
 
-Confidence is not a property of a depth sample that can be asked for separately.
-It belongs to a **different image**, and that image pairs with raw depth. So there
-is no confidence value for the map we read today.
+This section previously held the choice open, with density as the argument for
+automatic. The device closed it, and both halves of the reasoning are worth
+keeping because each is a different failure.
 
-Both streams are already available to us: the header states that "raw depth data
-is also available when `AR_DEPTH_MODE_AUTOMATIC` is selected", which is the mode
-`Subsystem::Create` sets. Reading raw as well costs an acquisition, not a
-reconfiguration.
+**Against automatic.** A TSDF performs its own temporal fusion. Integrating a map
+ARCore has already fused means fusing the same measurement twice, so the weights
+claim more independent evidence than was collected. Worse, "depth estimation for
+every pixel in the image" is more than any sensor measures, so the difference is
+smoothing plus inpainting of what was never observed. Averaging correlated data
+converges on the smoothing rather than on the surface, and the mean of a hundred
+views of the same guess is the guess.
 
-**The open question is which one a TSDF should actually integrate**, and there is
-a real argument on each side:
+**Raw is not free of that problem, it is honest about it.** Raw depth is motion
+stereo: ARCore matches image patches between successive frames and turns
+disparity into distance. On a plainly painted wall there is nothing to match, the
+matching cost is flat across the whole disparity search, and the minimum falls
+out of sensor noise rather than geometry. Those errors are correlated between
+nearby viewpoints exactly like the smoothed stream's are, so fusing more frames
+entrenches them.
 
-- *For raw.* A TSDF performs its own temporal fusion. Integrating a map ARCore
-  has already fused temporally means fusing the same measurement twice and coming
-  out over-confident about it — the weights claim more independent evidence than
-  was ever collected. And ARCore's own guidance for raw depth is that it is
-  "intended to be used in cases that involve understanding of the geometry in the
-  environment", which is a description of this namespace.
-- *For automatic.* Dense data is what makes a first reconstruction visibly work
-  or visibly not, and sparse input makes an incomplete surface ambiguous between
-  "the algorithm is wrong" and "there was no data there".
+The difference is that raw depth **says which samples those are**. That is what
+the confidence image is for, and using raw without it is using half the API.
 
-Automatic is the current choice for the second reason alone: it gets us to
-something on screen. That is a starting position, not a conclusion. Revisit it
-with measurements on a real device — not with taste.
+### The confidence map: MEASURED
+
+`ArFrame_acquireRawDepthConfidenceImage`, format `Y8`: one byte per depth sample,
+0 for lowest and 255 for highest, same dimensions as the depth map. ARCore
+documents all three of its depth outputs as identically sized, and
+`ar::Subsystem` checks that rather than assuming it, because a confidence map
+read at the wrong stride masks a drifting diagonal band of the depth map instead
+of the pixels it describes.
+
+Its distribution is the thing to know, and it is not what the linear 0-255 range
+suggests. Measured over sixty-frame windows while sweeping a room:
+
+```
+RECONPROBE confidence of the samples that DID exist, 32 wide: 40% 3% 3% 4% 4% 6% 4% 34%
+```
+
+**Bimodal.** Roughly 40% in the bottom bucket, roughly 34% in the top, and the
+six middle buckets holding 3% to 6% each. ARCore is close to binary about whether
+it knows a distance. Any weighting curve built on the assumption of a smooth
+spread is mostly operating on empty range.
+
+Separately, the fraction of samples with **no estimate at all** runs 6% to 25%
+under normal sweeping, rising above 70% when the phone is nearly still. That
+number matters because it bounds what any amount of filtering can achieve: a
+sample ARCore did not produce cannot be recovered by weighting.
+
+### Two ways to use it, and only one of them works
+
+Google's guidance is a hard threshold:
+
+> If an application requires filtering out low-confidence pixels, removing depth
+> pixels below a confidence threshold of half confidence (128) tends to work
+> well.
+
+Tried, measured, rejected. At 128 it discarded **79% of the samples in a frame**.
+The reconstruction became noticeably more faithful and unusable: a tiled floor
+came back as a scatter of disconnected islands rather than a surface.
+
+That is not a threshold in need of adjustment. A floor is precisely the
+low-texture surface the confidence map is most pessimistic about, so any
+threshold high enough to suppress the bad geometry also deletes the good
+geometry in the same regions.
+
+A TSDF fuses by weighted average, which gives a better instrument. A poor sample
+can be admitted with a small weight, so it builds a continuous surface where
+nothing better exists and is outvoted wherever something better arrives. So the
+two mechanisms in `Config` do different jobs:
+
+| field | job |
+|---|---|
+| `confidenceThreshold` (32) | outlier rejection. Keeps absurd readings out of the **frustum**, which is the one thing a weight cannot do. |
+| `confidenceWeightFloor` (0.05) | quality. Confidence 32..255 maps linearly onto weight 0.05..1.00. |
+
+The floor is deliberately not zero. Zero collapses the mechanism back into the
+gate that produced the islands.
+
+The gate is applied **before** the furthest-sample bookkeeping, and that ordering
+is not cosmetic. See *"The far plane trap"* below.
 
 ---
 
@@ -280,14 +411,14 @@ u = fx · (X / Z) + cx
 v = fy · (Y / Z) + cy
 ```
 
-`fx`, `fy` are the focal length expressed **in pixels** — in pixel widths and
+`fx`, `fy` are the focal length expressed **in pixels**, in pixel widths and
 pixel heights respectively. They differ only when the sensor's pixels are not
 square, which on a phone they essentially always are, so expect `fx ≈ fy` and
 treat a large gap as a bug rather than as a property of the hardware.
 
 `cx`, `cy` are the **principal point**: where the optical axis actually pierces
 the sensor. Near the image centre, never exactly at it, and that small offset is
-why ARCore's projection matrix carries terms outside the diagonal — see the
+why ARCore's projection matrix carries terms outside the diagonal. See the
 comment in `graphics/ArCamera.cpp` about negating the whole row rather than just
 `[1][1]`.
 
@@ -300,7 +431,7 @@ horizontal FOV = 2 · atan(width / (2 · fx))
 A phone's main camera should come out somewhere around 60-70°. If that number is
 absurd, the intrinsics do not belong to the image they are being used with.
 
-### Rescaling: a crop, then a scale — MEASURED
+### Rescaling: a crop, then a scale: MEASURED
 
 `ArCamera_getImageIntrinsics` describes the **CPU image**. The depth map is a
 different, smaller image. Using one against the other builds a reconstruction
@@ -322,7 +453,7 @@ resampled.
 
 The failure mode of getting this wrong is worth dwelling on, because it is the
 kind that survives review. Scaling `fy` by `depthHeight / imageHeight` preserves
-the field of view of the image you scaled *from* — so the maths ends up believing
+the field of view of the image you scaled *from*, so the maths ends up believing
 the depth map sees 57.2° vertically when it really sees 44.5°. Nothing looks
 broken. The room simply comes out with its floor and ceiling flared away from the
 camera, worsening toward the top and bottom of frame. Every other check in the
@@ -343,13 +474,13 @@ fy' = fy · s                cy' = (cy − cropTop)  · s
 ```
 
 The crop is derived from the two aspect ratios rather than hardcoded, so a device
-that crops the other way — or not at all — falls out of the same three lines.
+that crops the other way, or not at all, falls out of the same three lines.
 
 Two things in there are easy to get wrong:
 
 - **`cx` and `cy` are positions, not lengths.** The crop origin has to come off
   them *before* the scale. This is invisible on a perfectly centred sensor,
-  because `cx − cropLeft` lands back in the middle anyway — and no real sensor is
+  because `cx − cropLeft` lands back in the middle anyway, and no real sensor is
   perfectly centred.
 - **`s` is one number.** Because the crop restores the aspect ratio before the
   resample, the horizontal and vertical scales are equal. That is the invariant
@@ -358,8 +489,8 @@ Two things in there are easy to get wrong:
 
 On the measured numbers: `cropTop = 60`, `s = 0.25`, `fx 439.73 → 109.93`,
 `fy 440.19 → 110.05`, `cx 314.88 → 78.72`, `cy 241.35 → 45.34`. The sensor's
-off-centre principal point (+1.35 px of 480) survives as +0.34 px of 90 — exactly
-a quarter — which is independent confirmation that the crop really is centred.
+off-centre principal point (+1.35 px of 480) survives as +0.34 px of 90, exactly
+a quarter, which is independent confirmation that the crop really is centred.
 
 `ar::Subsystem::ReadDepthImage` does this and hands over the result as
 `depth.intrinsics`. `frame.imageIntrinsics` is kept alongside it so the two can be
@@ -377,7 +508,7 @@ tan(hfov/2) / tan(vfov/2)  ==  width / height
 Both sides equal `(width/2)/fx` over `(height/2)/fy` for square pixels, so it ties
 `fx`, `fy`, `width` and `height` together in a single number that no one of them
 can be wrong without disturbing. With the old height-ratio rescale it came out
-**1.335 against a 1.778 image** — a 25% error, on a frame where the horizontal
+**1.335 against a 1.778 image**, a 25% error, on a frame where the horizontal
 FOV, the stride, and the principal point all read as fine.
 
 `Subsystem` computes it on the first depth frame and states the verdict itself.
@@ -390,7 +521,7 @@ shape.
 The operation this whole namespace is built on: pixel + depth → a 3D point in the
 world.
 
-### Step 1 — pixel to camera space
+### Step 1: pixel to camera space
 
 Invert the projection. Given pixel `(u, v)` and depth `d` metres, and knowing
 `Z = d` because the depth is along the principal axis:
@@ -402,13 +533,13 @@ Z = d
 ```
 
 **This is where Z-versus-range earns its keep.** The ray through pixel `(u,v)` has
-direction `((u-cx)/fx, (v-cy)/fy, 1)` — note the third component is exactly `1`,
+direction `((u-cx)/fx, (v-cy)/fy, 1)`. Note that the third component is exactly `1`,
 un-normalised. Because `d` is measured along Z, scaling that un-normalised
 direction by `d` lands on the point directly. Had ARCore given range instead, the
-direction would first have to be normalised — a square root per pixel, and a
+direction would first have to be normalised, costing a square root per pixel, and a
 different answer.
 
-### Step 2 — into ARCore's axis convention
+### Step 2: into ARCore's axis convention
 
 The formulas above are the computer-vision convention: **+X right, +Y down, +Z
 forward**, because `v` counts downward from the top of the image.
@@ -428,7 +559,7 @@ pixel *below* the optical axis has `v > cy`, and it is physically *below* where
 the camera points, so its `Y` must be negative when +Y is up. And every visible
 point is in front of the camera, which is the −Z direction, so `Z` is negative.
 
-### Step 3 — camera space to world space
+### Step 3: camera space to world space
 
 `sensorPose` is a rotation and a translation. With `q` its unit quaternion and `t`
 its translation:
@@ -438,7 +569,7 @@ P_world = q · P_cam · q⁻¹ + t
 ```
 
 In GLM, `glm::quat(w, x, y, z) * P_cam + t`. ARCore's raw order is `qx, qy, qz,
-qw` and glm's constructor takes **w first** — the same reordering already
+qw` and glm's constructor takes **w first**, the same reordering already
 commented in `graphics/ArCamera.cpp`, and the same trap. Getting it wrong yields
 a rotation that looks plausible and that no single still frame reveals as wrong.
 
@@ -447,13 +578,13 @@ a rotation that looks plausible and that no single still frame reveals as wrong.
 Take the centre pixel, `u = cx`, `v = cy`. Then `X_cam = Y_cam = 0` and
 `Z_cam = -d`: a point straight down the optical axis at distance `d`. Transform it
 by `sensorPose` and it should sit exactly where the phone is pointing, `d` metres
-away. That single point, drawn as a marker, is the first thing worth building —
+away. That single point, drawn as a marker, is the first thing worth building,
 before any voxel exists.
 
 ## Rotation, and why it never appears in this namespace
 
 The obvious question, having read the above: don't the intrinsics have to be
-rotated to match the display at some point — if not now, then when the mesh is
+rotated to match the display at some point, if not now then when the mesh is
 finally drawn?
 
 No. Not now and not later. The display rotation never enters the reconstruction
@@ -474,7 +605,7 @@ pairing in which nothing needs rotating.
 
 Which is also why rotating the intrinsics *on their own* would be a bug rather
 than a step in the right direction. It is only meaningful together with rotating
-how the depth pixels are indexed **and** switching to `displayPose` — three
+how the depth pixels are indexed **and** switching to `displayPose`, so three
 changes that arrive at the number we already had.
 
 ```
@@ -503,7 +634,7 @@ display-oriented quantity. Unlocking landscape would change nothing in `recon`.
 ### The exception, and it is already solved
 
 One operation genuinely does need view-to-image: sampling depth at a **screen**
-pixel — tap-to-place, or occluding virtual content against real depth. That is
+pixel, for tap-to-place or for occluding virtual content against real depth. That is
 the reverse direction, from something the user touched to something the sensor
 measured.
 
@@ -518,7 +649,7 @@ by the depth map's width and height and you have the pixel to sample.
 # The representation: a TSDF
 
 Unprojection gives points. Points are not a surface, and a million of them from a
-thousand frames are not a better surface — they are a thousand noisy opinions
+thousand frames are not a better surface. They are a thousand noisy opinions
 about the same wall with no way to reconcile them. The TSDF is how they get
 reconciled.
 
@@ -537,7 +668,7 @@ surface is exactly here.
 reconstruction, and the one this namespace will follow: **positive in free
 space**, between the camera and the surface; **negative behind the surface**,
 inside the wall where the camera cannot see; zero on the surface itself. It is
-only a convention — flipping it flips every normal in the output mesh — but it has
+only a convention, and flipping it flips every normal in the output mesh, but it has
 to be picked once and never wavered on.
 
 **Truncated.** Values are stored only in a thin band around the measured surface,
@@ -565,7 +696,7 @@ at the same wall. They have to be combined somehow.
 
 Fusing 3D observations becomes **a running weighted average of scalars**, which is
 about the easiest operation in computing. Noise averages away. Holes fill in as
-new data arrives. Topology resolves itself — no stitching, no overlap tests,
+new data arrives. Topology resolves itself, with no stitching, no overlap tests,
 nothing.
 
 ## One ray, with numbers
@@ -575,7 +706,7 @@ ray and store `sdf = d − t` at each voxel `t` metres along it:
 
 | t (m) | sdf = d − t | meaning |
 |---|---|---|
-| 1.84 | — | outside the band, untouched |
+| 1.84 | none | outside the band, untouched |
 | 1.88 | +0.12 | band edge, free space |
 | 1.92 | +0.08 | free space |
 | 1.96 | +0.04 | free space, closing in |
@@ -583,11 +714,11 @@ ray and store `sdf = d − t` at each voxel `t` metres along it:
 | 2.04 | −0.04 | behind the surface |
 | 2.08 | −0.08 | behind |
 | 2.12 | −0.12 | band edge |
-| 2.16 | — | outside, untouched |
+| 2.16 | none | outside, untouched |
 
 ## The fusion rule
 
-The next frame measures the same wall at **2.02m** — the same wall, a different
+The next frame measures the same wall at **2.02m**, the same wall at a different
 number, because the sensor is noisy. The voxel at t = 2.00 receives a new
 observation of +0.02. With both weights at 1:
 
@@ -616,8 +747,8 @@ Note that the distance is **normalised** and the weight is not. That division is
 what keeps the stored number a distance in metres. An un-normalised weighted sum
 would grow without bound: its zero crossing would still be findable, but the
 magnitude would stop meaning anything geometric, and everything that reads the
-magnitude — interpolating where the surface crosses a marching-cubes edge,
-gradients, clearance queries — would break.
+magnitude would break: interpolating where the surface crosses a
+marching-cubes edge, gradients, clearance queries.
 
 ### Where the distance-dependence actually lives
 
@@ -644,7 +775,7 @@ derived from it, cannot drift out of agreement with itself.
 
 (`ConstantWeighter::GetWeight` also receives `surfaceDist`, the position within
 the band, and ignores it. That is the hook for weighting the front of the band
-above the back — an observation of free space being more trustworthy than a guess
+above the back, an observation of free space being more trustworthy than a guess
 about what is behind a surface. Unused in OpenChisel; worth remembering.)
 
 ## Getting a surface back out
@@ -675,19 +806,19 @@ described above.
 
 None of it is CHISEL's. The TSDF is Curless & Levoy (1996); doing it live from a
 depth camera is KinectFusion (2011). Both assume a **dense** voxel grid inside a
-bounding box declared up front — "reconstruct this 4×4×4m cube" — and allocate
+bounding box declared up front, "reconstruct this 4×4×4m cube", and allocate
 all of it, air included.
 
 CHISEL's contributions are about making that survive on a phone, in a scene with
 no declared size:
 
-- **spatial hashing of chunks** — small blocks of voxels allocated only where
+- **spatial hashing of chunks**, small blocks of voxels allocated only where
   surface actually appears, so empty space costs nothing at all, not even a hash
   entry, and there is no bounding box to declare in advance;
-- **dynamic truncation** — τ grows with distance, because depth error grows with
-  distance (quadratically, for ARCore, which is where `QuadraticTruncator` comes
-  from);
-- **space carving** — actively clearing voxels observed to be empty, so that
+- **dynamic truncation**, where τ grows with distance because depth error grows
+  with distance (quadratically, for ARCore, which is where `QuadraticTruncator`
+  comes from); - **space carving**, actively clearing voxels observed to be
+  empty, so that
   something which moves away does not leave a ghost behind.
 
 So when the paper concentrates on hashing and chunk management rather than on the
@@ -697,31 +828,241 @@ is the reason we are writing it ourselves rather than taking OpenChisel whole.
 
 ---
 
+# The library, as it exists
+
+## The shape of the API
+
+One object, at process scope, driven once per frame.
+
+```cpp
+recon::Config config;
+recon::reconstruction_holder::Create(config, error);
+
+// per frame, under the ar::Subsystem frame guard
+reconstruction->Integrate(frame.depth, frame.sensorPose);
+reconstruction->Remesh(kRemeshBudgetPerFrame);
+reconstruction->CollectUpdates(changed, removed);
+for (const ChunkUpdate& u : changed) {
+    reconstruction->WriteChunk(u.key, vertices, vertexCapacity, indices, indexCapacity);
+}
+```
+
+`reconstruction_holder` mirrors `subsystem_holder` and for the same reason. A
+`Device` is destroyed every time the app is backgrounded, and a reconstruction
+owned by it would throw away the mapped world on every press of Home. That is the
+one thing in this app that has to survive, so it lives beside the `VkInstance`
+rather than inside the renderer.
+
+`MarkAllDirty` is the other half of that lifetime. After a `Device` rebuild every
+node holding a chunk mesh has been destroyed while the voxels are still here, so
+the renderer asks for the whole map back rather than assuming an empty scene means
+an empty world.
+
+### The types that cross the boundary
+
+Nothing here mentions Eigen, and that is a build constraint rather than a style
+preference. See *"The boundary, and why it is also a build setting"* above.
+
+| type | what it is |
+|---|---|
+| `ChunkKey` | three `int32_t`. `Eigen::Vector3i` on the other side. |
+| `ChunkUpdate` | key, world-space origin, vertex count, index count. Deliberately carries no geometry. |
+| `Vertex` | 24 bytes, position and normal, `static_assert`ed. Laid out to match `graphics::PositionNormalVertex` exactly. |
+| `Config` | everything that has to be decided before the first frame. |
+
+`ChunkUpdate` is cheap on purpose. The caller reads it, sizes and maps a buffer,
+then asks `WriteChunk` to interleave straight into that buffer. Handing out the
+geometry here instead would mean a full extra copy of every remeshed chunk every
+frame.
+
+`WriteChunk` takes a destination rather than returning a span for the same
+reason: it makes the conversion from OpenChisel's separate vertex and normal
+arrays a single pass, landing in GPU-visible memory.
+
+Vertices are **chunk local**, with the chunk's origin already subtracted, and the
+node's transform is what puts them back in the world. That is not only tidiness.
+A room is tens of metres across, and float32 near 30.0 has about two micrometres
+of precision left after the exponent takes its share. Chunk-local coordinates keep
+the sub-millimetre detail marching cubes worked to produce.
+
+### Spatial hashing lives outside this namespace
+
+CHISEL hashes chunks internally, but the renderer keeps its own map from chunk
+coordinates to scene nodes. `graphics::SpaceChunk` is a component on `Node`
+alongside `Renderable` and `Camera`, hashed with the same Teschner primes
+`ChunkHasher` uses.
+
+That map is a **cache**, not the source of truth, and the distinction is the
+lifetime one above. Every entry in it is destroyed with the `Device`. The voxels
+are not.
+
+## The remesh cycle, and the starvation bug it exists to avoid
+
+`Remesh(maxChunks)` runs marching cubes on a bounded number of dirty chunks per
+frame and returns how many it did. Budgeting is not optional: integration marks
+the whole 3x3x3 neighbourhood of every chunk it touches, because meshing reads
+neighbours to close the seams between chunks, so sweeping a room dirties hundreds
+at once.
+
+The obvious implementation of that budget starves, and it starved here for long
+enough to be blamed on three other things first.
+
+```cpp
+// WRONG
+for (auto it = pending.begin(); it != pending.end() && done < maxChunks;) {
+    const chisel::ChunkID id = it->first;
+    it = pending.erase(it);
+    ...
+}
+```
+
+`ChunkSet` is `std::unordered_map<ChunkID, bool, ChunkHasher>`, so `begin()` is
+the first non-empty **hash bucket**. That is a fixed and arbitrary function of the
+chunk coordinates. Meanwhile integration re-inserts the same chunks every frame
+into the same buckets, so the loop drains the same low-bucket chunks forever and
+never reaches the high-bucket ones.
+
+The symptom on the device was a backlog pinned at 129 chunks while 240 chunks a
+second were being remeshed, and geometry that appeared in some regions and never
+in others with no geometric pattern to it. An object could be cut cleanly in half
+along a chunk boundary and stay that way indefinitely. **The budget was never the
+constraint. The ordering was.**
+
+What is there now is a cycle. Everything pending goes into a queue, the queue
+drains at the budget over as many frames as it takes, and it refills only once
+empty. Chunks dirtied mid-cycle collect in Chisel's set and are picked up at the
+next refill, so every dirty chunk is meshed within `queueSize / maxChunks` frames.
+
+`pendingRemeshCount()` reports the queue and the set together. Reporting only the
+set would read as zero at the moment a full cycle had just been taken out of it.
+
+## The far plane trap
+
+`Chisel::IntegrateDepthScan` does **not** use the camera's configured far plane.
+It calls `depthImage->GetStats` and builds its frustum from the maximum value in
+the image, then allocates a chunk for every chunk that frustum meets.
+
+Depth is uint16 millimetres, so a single stray pixel can claim 65 metres. Frustum
+volume grows with the cube of its depth. One outlier turned a 5 metre view worth
+roughly 190 chunks into hundreds of thousands, and at 32 KiB of voxels each the
+process passed 1.1 GB and died inside `Chunk::AllocateDistVoxels`.
+
+Two things in `Integrate` exist because of this, and neither is decoration:
+
+- **The depth clamp.** Anything outside `[nearPlane, farPlane]` becomes NaN,
+  exactly like a sample ARCore never had. This is what keeps the frustum finite.
+- **The confidence gate runs first.** The wildest readings in a raw frame are the
+  near-zero confidence ones. Letting them set the far plane and only then
+  discarding their depth would pay the whole cost of the outlier and collect none
+  of its geometry. Measured: with the gate in place, the furthest accepted sample
+  in a room-scale sweep stays under 2.7 m against a 3.0 m far plane, so the far
+  plane stops being the binding constraint at all.
+
+Raw depth made this worse than the smoothed stream did, for a reason worth
+remembering: smoothing bounds outliers, and sparsity does not.
+
+### Why `farPlane` defaults to 3 m
+
+It is the most expensive number in `Config`, and not because of quality. The
+integrator visits every chunk whose box meets the frustum and projects all 4096
+of its voxels whether or not any surface is near them, so per-frame cost tracks
+frustum **volume**. Going from 5 m to 3 m leaves 22% of it.
+
+Chosen from the scene rather than by tuning. This is a room-scale reconstruction,
+ARCore's raw depth on interior surfaces is unreliable well before 5 m, and a wall
+at 4 m contributes samples too coarse to mesh usefully at 4 cm voxels. Raising it
+is a capability change rather than a knob.
+
+## The empty-frame guard
+
+`Integrate` returns early when no sample survived. This is a safety guard.
+
+`GetStats` skips NaN, so on an all-NaN image it leaves its outputs at their
+initial values of `FLT_MAX` and `-FLT_MAX` and hands those to `SetNearPlane` and
+`SetFarPlane`. The frustum built from an inverted, infinite pair of planes has a
+bounding box to match, and `GetChunkIDsIntersecting` then loops over the chunk
+indices between two saturated integers.
+
+Rare before the confidence gate existed, because a frame with no readings at all
+is rare. Not rare after it: a dark room, a phone still on a desk, or the first
+seconds after a resume all produce frames where everything is below threshold.
+
+## Reading the instruments
+
+Everything this namespace logs is tagged `RECONPROBE`, and that token appears
+nowhere else on the system. Filtering by log tag alone is not enough in practice,
+because ARCore is extremely chatty under its own tags.
+
+The probes state verdicts rather than printing raw numbers for someone to
+interpret, since every check is a fixed comparison against a fixed expectation
+and having the device decide removes the step where the numbers get read wrong.
+
+| line | what it settles |
+|---|---|
+| `VERDICT OK` / `VERDICT FAIL` | intrinsics rescaling. The single most consequential thing to get right, and see the FOV ratio check above for why it catches what individual numbers do not. |
+| `confidence map PRESENT` / `ABSENT` | whether the confidence half of raw depth is actually arriving. |
+| `first frame with data` | sample budget on a frame that actually has readings. Fires on the first such frame, not the first frame, because a stationary phone reports zero valid samples and a probe that speaks once would report 0% forever. |
+| `integrate N ms mean over 60 frames` | where the frame went. The CPU cost was known and assumed to be here before this existed, and the far plane was about to be cut on that assumption. |
+| `depth budget over the window` | how many samples ARCore never produced. Bounds what filtering can achieve. |
+| `confidence of the samples that DID exist` | the bimodal distribution above. Decides whether any threshold is meaningful. |
+| `chunk vertex counts ... in buckets of 512` | settles the mesh capacity in `graphics::HelloWorld`, which is fixed at creation. |
+| `dedup ratio` | 1.00 means the edge keys are not matching and vertex sharing is silently not happening, which looks identical on screen. |
+
+---
+
 # Status
 
-**Done** — the input is available and the app builds:
+**Working, and validated on a device.** The whole chain runs: depth acquisition,
+intrinsics rescaling through a measured crop, unprojection, TSDF integration,
+marching cubes with shared vertices, chunk meshes uploaded to Vulkan and drawn
+over the camera feed.
 
-- Depth enabled on the session, guarded by `ArSession_isDepthModeSupported`, so a
-  device without depth support still gets a working camera feed and tracking
-  rather than a failed `ArSession_configure`.
-- `CameraFrame::depth` — the 16-bit map, borrowed for one frame like the camera
-  image.
-- `CameraFrame::sensorPose` alongside the renamed `displayPose`.
-- `CameraFrame::imageIntrinsics`, and `depth.intrinsics` rescaled to the depth
-  map's own resolution.
-- First-frame logging of both resolutions, both aspect ratios and both sets of
-  intrinsics.
+The validation sequence this section used to prescribe was followed and each step
+earned its place. The centre-pixel marker caught nothing on its own, because a
+live marker cancels its own error: reconstruction uses `sensorPose` and the
+renderer uses `displayPose`, so a wrong pose looked correct until the marker was
+**frozen** in world space and the phone moved away from it. Worth knowing if any
+of this ever needs revalidating.
 
-**Next, and in this order:**
+| | measured |
+|---|---|
+| frame loop | 30.0 fps, camera rate |
+| integrate | 19 ms with 111 chunks in view |
+| GPU frame | 0.82 ms |
+| dedup ratio | 4.69x |
+| mesh memory | 4 MiB across 64 chunk nodes |
+| chunk capacity overflows | 0 of 204 remeshes at 1024 vertices |
 
-1. **Run it on a device and read the log line.** Confirm the depth resolution,
-   that the aspect ratios agree (no crop), and that the FOV implied by `fx` is
-   sane. Everything downstream is built on those three numbers.
-2. **Unproject one pixel and draw it.** The centre-pixel check above, as a marker
-   in the world. This validates the entire chain — units, both sign flips,
-   quaternion order, pose choice — with geometry simple enough that being wrong
-   is obvious.
-3. **Unproject the whole map as a point cloud.** Still no voxels. A wrong `fy`,
-   a crop, or a transposed row stride are all invisible on one point and
-   unmistakable on twenty thousand.
-4. Only then: chunks, TSDF integration, marching cubes.
+**Known wrong, in the order worth fixing:**
+
+1. **The weight curve does not match the confidence distribution.** The linear
+   ramp from 0.05 to 1.00 spends nearly its whole range on the six middle
+   histogram buckets, which hold about a quarter of the samples. A curve that
+   separates the two modes should be worth more than any truncation tuning. This
+   is the remaining lever against surface undulation.
+2. **Space carving is broken and switched off.** `DistVoxel::Carve` increases the
+   weight of the voxel it is trying to erase, so objects removed from the scene
+   do not erode. The fork's README has the analysis. Fixing it also makes a
+   weight cap safe, which is the other half of the same problem.
+3. **Truncation does not depend on distance.** `truncationQuadratic` and
+   `truncationLinear` are both zero, so tau is a constant 0.06 m at every range,
+   while ARCore documents its depth error as growing quadratically with distance.
+   Dynamic truncation is one of the things CHISEL contributes over plain
+   KinectFusion and it is currently switched off. It has never been evaluated on
+   its own, only as part of a four-change experiment that was reverted whole.
+
+**Not wrong, and not worth trying to fix:**
+
+- The **sawtooth boundary** at the frontier of the reconstruction. Marching cubes
+  refuses to mesh a chunk's outer voxel layer until `allNeighborsObserved`, so
+  the edge of what has been seen always arrives as a zigzag. It resolves as the
+  sweep continues.
+
+**What the current quality unlocks.** The surface is now good enough that the
+remaining noise can be attacked on the **mesh** rather than in the field.
+Decimation or smoothing over chunk meshes is pure, wide, and fixed in output
+size, which is the shape a compute shader wants, and it sits in the same pipeline
+stage as the marching cubes migration identified above as the first good
+candidate. That option did not exist while entire chunks were missing for
+undiagnosed reasons: a smoothing pass would have produced a better looking
+surface and hidden the starvation bug underneath it.

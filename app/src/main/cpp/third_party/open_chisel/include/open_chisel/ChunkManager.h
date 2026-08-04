@@ -22,6 +22,7 @@
 #ifndef CHUNKMANAGER_H_
 #define CHUNKMANAGER_H_
 
+#include <cstdint>
 #include <memory>
 #include <unordered_map>
 #include <mutex>
@@ -169,8 +170,8 @@ namespace chisel
             Vec3 InterpolateColor(const Vec3& colorPos);
 
             void CacheCentroids();
-            void ExtractBorderVoxelMesh(const ChunkPtr& chunk, const Eigen::Vector3i& index, const Eigen::Vector3f& coordinates, VertIndex* nextMeshIndex, Mesh* mesh);
-            void ExtractInsideVoxelMesh(const ChunkPtr& chunk, const Eigen::Vector3i& index, const Vec3& coords, VertIndex* nextMeshIndex, Mesh* mesh);
+            void ExtractBorderVoxelMesh(const ChunkPtr& chunk, const Eigen::Vector3i& index, const Eigen::Vector3f& coordinates, std::unordered_map<uint64_t, VertIndex>* edgeVertices, VertIndex* nextMeshIndex, Mesh* mesh);
+            void ExtractInsideVoxelMesh(const ChunkPtr& chunk, const Eigen::Vector3i& index, const Vec3& coords, std::unordered_map<uint64_t, VertIndex>* edgeVertices, VertIndex* nextMeshIndex, Mesh* mesh);
 
             inline const MeshMap& GetAllMeshes() const { return allMeshes; }
             inline MeshMap& GetAllMutableMeshes() { return allMeshes; }

@@ -106,9 +106,65 @@ struct Config {
     bool carvingEnabled = false;
     float carvingDistance = 0.05f;
 
-    /** Depth range to trust, in metres. ARCore's useful band is roughly this. */
+    /**
+     * Confidence below which a depth sample is thrown away outright, 0-255.
+     *
+     * ## This is an outlier filter, NOT the quality control
+     *
+     * Google's guidance for raw depth is to drop everything below 128, and on
+     * this device that was measured rejecting 79% of the samples in a frame.
+     * The reconstruction became notably more faithful and completely unusable:
+     * a floor came back as a scatter of disconnected islands rather than a
+     * surface. That is not a threshold that needs adjusting, it is the wrong
+     * instrument. A floor is exactly the low-texture surface the confidence map
+     * is most pessimistic about, so a gate high enough to suppress the bad
+     * geometry also deletes the good.
+     *
+     * Quality is handled by confidenceWeightFloor below, which lets poor samples
+     * still build a continuous surface while being outvoted where better ones
+     * exist. What remains for this number is the job a weight cannot do: keeping
+     * the worst readings out of the FRUSTUM. The far plane Chisel integrates
+     * against comes from the furthest surviving sample (see Reconstruction.cpp),
+     * and the wildest readings in a raw frame -- the 13 m one in a one metre
+     * room that put the process past 1.1 GB -- are the near-zero confidence
+     * ones. Low enough to keep the floor, high enough to keep the garbage out.
+     *
+     * 0 disables it and fuses everything, which is what the app did before this
+     * existed.
+     * */
+    uint8_t confidenceThreshold = 32;
+
+    /**
+     * The weight the LEAST confident surviving sample gets, relative to 1.0 for
+     * a fully confident one. Weight is linear in confidence between the two.
+     *
+     * Not zero, and that is the whole design. A sample at confidence 40 is worth
+     * far less than one at 240, but it is worth much more than nothing when it
+     * is the only observation of that patch of floor -- and a TSDF fuses by
+     * weighted average, so a small weight is exactly the way to say "use this
+     * unless something better turns up". Zero here reduces the mechanism back to
+     * the gate that produced the disconnected islands.
+     * */
+    float confidenceWeightFloor = 0.05f;
+
+    /**
+     * Depth range to trust, in metres.
+     *
+     * The far plane is the most expensive number in this struct, and not because
+     * of quality. Every frame the integrator visits every chunk whose box meets
+     * the view frustum and projects all 4096 of its voxels, whether or not any
+     * surface is near them -- so the per-frame cost tracks the VOLUME of the
+     * frustum, which grows with the cube of this. Dropping 5 m to 3 m leaves
+     * (3/5)^3 = 22% of the volume.
+     *
+     * 3 m is chosen from the scene rather than by tuning: this is a room-scale
+     * reconstruction of things within arm's reach to across the room, ARCore's
+     * raw depth on interior surfaces is already unreliable well before 5 m, and
+     * a wall at 4 m contributes samples too coarse to mesh usefully at 4 cm
+     * voxels. Raising it back is a real capability change, not a knob.
+     * */
     float nearPlane = 0.3f;
-    float farPlane = 5.0f;
+    float farPlane = 3.0f;
 };
 
 class Reconstruction {

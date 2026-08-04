@@ -28,16 +28,39 @@ constexpr const char* kChunkMaterialName = "ReconChunk";
 constexpr uint32_t kRemeshBudgetPerFrame = 8;
 
 /**
- * Vertices a chunk mesh is allocated for. A GUESS, and the histogram below is
- * what replaces it with a measurement.
+ * Vertices a chunk mesh RESERVES. Measured, and the distinction between reserved
+ * and used is the whole point of this comment.
  *
- * It matters because MeshStorage::Mutable fixes capacity at creation: too small
- * and dense chunks are dropped, too large and most of the biggest allocation in
- * the app is empty. A 16^3 chunk can in theory emit tens of thousands of
- * vertices; a chunk holding one wall emits a few hundred.
+ * MeshStorage::Mutable fixes capacity at creation and reserves
+ * kFramesInFlight copies of it, so a chunk costs the same whether it holds forty
+ * vertices or four thousand. At 4096 that was 240 KiB per chunk, and a room's
+ * worth of chunks took the process out of memory -- the symptom being ARCore's
+ * camera ImageReader failing to allocate, because by then nothing could.
+ *
+ * The histogram below measures what is USED, and after deduplication every one
+ * of 203 remeshes came in under 512 vertices. Deduplication cut usage 4.48x and
+ * cut reservation by nothing at all, which is exactly how "there is plenty of
+ * headroom" and "we are out of memory" were true at the same time.
+ *
+ * 1024 leaves twice the measured maximum.
  * */
-constexpr uint32_t kChunkVertexCapacity = 4096;
-constexpr uint32_t kChunkIndexCapacity = kChunkVertexCapacity * 3;
+constexpr uint32_t kChunkVertexCapacity = 1024;
+
+/**
+ * FIVE times the vertex capacity, and this ratio inverted when deduplication
+ * landed. It is worth stating why, because both the old value and the obvious
+ * correction are wrong now.
+ *
+ * Upstream emitted a triangle soup: three fresh vertices per triangle, so
+ * indexCount == vertexCount exactly, and 3x was three times too much. Sharing
+ * vertices does not change the number of indices -- still three per triangle --
+ * it only shrinks the vertex count, so the ratio between them became the
+ * deduplication ratio itself. That measured 4.48x on a real scan.
+ *
+ * So a chunk needs roughly 4.5 indices per vertex now, and sizing them equal
+ * (which was correct for a soup) would make every chunk overflow and be dropped.
+ * */
+constexpr uint32_t kChunkIndexCapacity = kChunkVertexCapacity * 5;
 
 } // namespace
 
@@ -225,6 +248,19 @@ void HelloWorld::UpdateReconstruction(const ar::CameraFrame& frame) {
                                                update.vertexCount / 512);
         ++chunkVertexHistogram_[bucket];
         ++chunkMeshCount_;
+
+        // indices / vertices IS the deduplication ratio, and it needs no extra
+        // plumbing to measure. Marching cubes emits three indices per triangle
+        // whether or not vertices are shared, so the index count is 3F either
+        // way; only the vertex count moves. A triangle soup therefore reads
+        // exactly 1.00, and a fully shared manifold surface should read around
+        // 6, since V is about F/2 there.
+        //
+        // Worth having as a number rather than a belief: if it comes back near
+        // 1 the edge keys are not matching and the sharing is not happening,
+        // and that would look identical on screen.
+        totalChunkVertices_ += update.vertexCount;
+        totalChunkIndices_ += update.indexCount;
         if (update.vertexCount > kChunkVertexCapacity ||
             update.indexCount > kChunkIndexCapacity) {
             ++chunkOverflowCount_;
@@ -239,6 +275,23 @@ void HelloWorld::UpdateReconstruction(const ar::CameraFrame& frame) {
         entry.uploadsRemaining = FrameRing::kFramesInFlight;
     }
 
+    // Every 64 nodes. The failure this watches for is unbounded growth, so the
+    // interesting quantity is how fast it climbs, not where it is.
+    if (chunkNodes_.size() >= lastReportedNodeCount_ + 64) {
+        lastReportedNodeCount_ = chunkNodes_.size();
+        // What MeshStorage::Mutable actually reserves: kFramesInFlight regions
+        // of (vertices + indices), whatever the chunk ends up using.
+        const size_t bytesPerMesh =
+                static_cast<size_t>(FrameRing::kFramesInFlight) *
+                (kChunkVertexCapacity * sizeof(recon::Vertex) + kChunkIndexCapacity * 2);
+        __android_log_print(ANDROID_LOG_INFO, kLogTag,
+                            "RECONPROBE %zu chunk nodes reserving %zu MiB of mesh (%zu KiB each), "
+                            "%u voxel chunks, %u awaiting remesh",
+                            chunkNodes_.size(), (chunkNodes_.size() * bytesPerMesh) / (1024 * 1024),
+                            bytesPerMesh / 1024, reconstruction->chunkCount(),
+                            reconstruction->pendingRemeshCount());
+    }
+
     if (!loggedChunkHistogram_ && chunkMeshCount_ >= 200) {
         loggedChunkHistogram_ = true;
         __android_log_print(ANDROID_LOG_INFO, kLogTag,
@@ -250,6 +303,15 @@ void HelloWorld::UpdateReconstruction(const ar::CameraFrame& frame) {
                             chunkVertexHistogram_[4], chunkVertexHistogram_[5],
                             chunkVertexHistogram_[6], chunkVertexHistogram_[7],
                             chunkOverflowCount_, kChunkVertexCapacity);
+        __android_log_print(ANDROID_LOG_INFO, kLogTag,
+                            "RECONPROBE dedup ratio %.2fx (%llu indices over %llu vertices); "
+                            "a soup reads 1.00, a fully shared surface about 6",
+                            totalChunkVertices_ > 0
+                                    ? static_cast<double>(totalChunkIndices_) /
+                                              static_cast<double>(totalChunkVertices_)
+                                    : 0.0,
+                            static_cast<unsigned long long>(totalChunkIndices_),
+                            static_cast<unsigned long long>(totalChunkVertices_));
     }
 }
 

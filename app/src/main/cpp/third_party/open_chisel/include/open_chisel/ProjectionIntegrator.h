@@ -87,9 +87,45 @@ namespace chisel
 
                     if (fabs(surfaceDist) < truncation + diag)
                     {
-                        DistVoxel& voxel = chunk->GetDistVoxelMutable(i);
-                        voxel.Integrate(surfaceDist, 1.0f);
-                        updated = true;
+                        // LOCAL MODIFICATION: per-pixel weight.
+                        //
+                        // Upstream passes a hardcoded 1.0f here -- every sample
+                        // counts the same, and the `weighter` member is consulted
+                        // only by IntegrateColor, which this app never calls. So
+                        // the weighting policy was silently absent from the one
+                        // path that runs.
+                        //
+                        // That matters because our depth samples are NOT of equal
+                        // quality and we are told which is which. ARCore's raw
+                        // depth is motion stereo, and its confidence map says how
+                        // well the disparity search actually matched. A sample
+                        // from a textured surface and a sample from a blank
+                        // painted wall arrive in the same image and deserve very
+                        // different votes.
+                        //
+                        // Weighting rather than DISCARDING is the point. A gate
+                        // that drops everything below a threshold makes the
+                        // reconstruction honest and full of holes -- a floor
+                        // comes out as disconnected islands, because a floor is
+                        // exactly the kind of low-texture surface the confidence
+                        // map is pessimistic about. A weight lets the poor
+                        // samples still build a continuous surface while being
+                        // outvoted wherever a good one exists.
+                        //
+                        // Indexed at the SAME pixel the depth was read from, so
+                        // it costs one array read and no extra projection.
+                        float weight = 1.0f;
+                        if (weights)
+                        {
+                            weight = weights->DepthAt((int)cameraPos(1), (int)cameraPos(0));
+                        }
+
+                        if (weight > 0.0f)
+                        {
+                            DistVoxel& voxel = chunk->GetDistVoxelMutable(i);
+                            voxel.Integrate(surfaceDist, weight);
+                            updated = true;
+                        }
                     }
                     else if (enableVoxelCarving && surfaceDist > truncation + carvingDist)
                     {
@@ -195,12 +231,31 @@ namespace chisel
 
             inline void SetCentroids(const Vec3List& c) { centroids = c; }
 
+            /**
+             * LOCAL ADDITION: per-pixel integration weights, one float per depth
+             * sample, same dimensions as the depth image. Null restores upstream
+             * behaviour, which is a weight of 1.0 everywhere.
+             *
+             * A weight of 0 means "do not fuse this sample at all", which is how
+             * a caller expresses a hard rejection without having to also blank
+             * the depth map -- useful because the depth map's non-NaN extent is
+             * what sizes the frustum.
+             *
+             * Set per frame, before IntegrateDepthScan. Held as a shared_ptr for
+             * the same reason the depth image is: the integrator is const during
+             * integration and must not own a dangling raw pointer if the caller
+             * reallocates between frames.
+             * */
+            inline void SetWeights(const std::shared_ptr<const DepthImage<float> >& w) { weights = w; }
+            inline void ClearWeights() { weights.reset(); }
+
         protected:
             Truncator truncator;
             Weighter weighter;
             float carvingDist;
             bool enableVoxelCarving;
             Vec3List centroids;
+            std::shared_ptr<const DepthImage<float> > weights;
     };
 
 } // namespace chisel 

@@ -197,6 +197,41 @@ struct DepthImage {
     int32_t rowStrideBytes = 0;
 
     /**
+     * How much ARCore believes each sample above, 0 to 255. Null when the
+     * confidence image could not be acquired.
+     *
+     * ## Not optional in practice, and the reason is what raw depth IS
+     *
+     * The raw stream is motion stereo: ARCore matches image patches between
+     * successive frames and turns disparity into distance. That works wherever
+     * the picture has texture to match. On a plainly painted wall there is
+     * nothing to match, the matching cost is flat across the whole search, and
+     * the minimum is chosen by sensor noise, compression blocking and lens
+     * shading rather than by geometry.
+     *
+     * The result is not noise in the sense a TSDF is built to eat. Noise cancels
+     * because successive errors are INDEPENDENT; these are not. From a similar
+     * viewpoint the same flat patch produces the same spurious match, so fusing
+     * a hundred frames converges on the artefact instead of averaging it away.
+     * That is what the blobs on a featureless wall are, and no amount of
+     * truncation or weighting tuning reaches them — the input is confidently
+     * wrong rather than uncertain.
+     *
+     * This image is how ARCore says which is which, and Google's own guidance is
+     * explicit that raw depth is to be used WITH it: "removing depth pixels
+     * below a confidence threshold of half confidence (128) tends to work well".
+     * Using the raw stream without this is using half of the API.
+     *
+     * Same dimensions as the depth map — ARCore documents all three of its depth
+     * outputs as identically sized — but its own stride, because it is an 8-bit
+     * Y8 plane and this one is 16-bit.
+     * */
+    const uint8_t* confidence = nullptr;
+
+    /** Distance between confidence row starts, in bytes. One byte per sample. */
+    int32_t confidenceRowStrideBytes = 0;
+
+    /**
      * Intrinsics expressed against THIS image's dimensions.
      *
      * Not what ARCore handed over: it describes the CPU image, which is several
@@ -446,6 +481,8 @@ private:
     void* arFrame_ = nullptr;
     void* image_ = nullptr;
     void* depthImage_ = nullptr;
+    /** The confidence map for depthImage_. Released alongside it. */
+    void* confidenceImage_ = nullptr;
     /** Allocated once and reused: ArPose_create every frame would be litter. */
     void* pose_ = nullptr;
     /** Likewise, and reused for both the image and the depth reads. */
@@ -466,6 +503,9 @@ private:
 
     /** The same, for depth: one line per reason, not sixty a second. */
     bool warnedAboutDepth_ = false;
+
+    /** And for the confidence map, which fails independently of the depth. */
+    bool warnedAboutConfidence_ = false;
 
     /**
      * So the first depth map that arrives gets its dimensions and rescaled

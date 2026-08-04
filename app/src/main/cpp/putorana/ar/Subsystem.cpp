@@ -302,6 +302,15 @@ void Subsystem::ReleaseImage() {
         ArImage_release(Image(depthImage_));
         depthImage_ = nullptr;
     }
+    // A third acquisition against the same pool, so it obeys the same rule. It
+    // is released even when the depth image it describes was not acquired: the
+    // two calls can fail independently and leaking on the odd frame where only
+    // one succeeded would exhaust the pool a few hundred frames later, far from
+    // the cause.
+    if (confidenceImage_ != nullptr) {
+        ArImage_release(Image(confidenceImage_));
+        confidenceImage_ = nullptr;
+    }
 }
 
 void Subsystem::ReadCamera() {
@@ -455,8 +464,34 @@ void Subsystem::ReadDepthImage() {
     ArSession* session = Session(session_);
     ArFrame* frame = Frame(arFrame_);
 
+    // RAW depth, not the smoothed one, and this is a reconstruction decision
+    // rather than a detail.
+    //
+    // ArFrame_acquireDepthImage16Bits gives the AUTOMATIC stream, which ARCore
+    // describes as providing "depth estimation for every pixel in the image".
+    // Every pixel is more than any sensor measures, so the difference is
+    // smoothing plus inpainting of what was never observed. On the device that
+    // showed up as exactly two things: a flat floor reconstructed as a field of
+    // rounded lumps, and large planar slabs standing where nothing is.
+    //
+    // Both are fatal to a TSDF in a way no amount of tuning reaches. Fusing many
+    // views removes noise because the errors are INDEPENDENT and cancel;
+    // pre-smoothed data is correlated between frames, so averaging it converges
+    // on the smoothing rather than on the surface. Inpainted regions are worse
+    // still — that error is systematic, and the mean of a hundred views of the
+    // same guess is the guess.
+    //
+    // The raw stream is "mostly unfiltered", sparse, and leaves 0 wherever it
+    // has no estimate. Noisy is the raw material a TSDF is built to eat. Absent
+    // is honest: 0 becomes NaN in Reconstruction and is skipped, instead of
+    // becoming a wall that was never there. ARCore's own documentation says raw
+    // "is intended to be used in cases that involve understanding of the
+    // geometry in the environment", which is this case exactly.
+    //
+    // No session reconfiguration needed: AR_DEPTH_MODE_AUTOMATIC already exposes
+    // both streams, so this is one call swapped for another.
     ArImage* image = nullptr;
-    const ArStatus acquired = ArFrame_acquireDepthImage16Bits(session, frame, &image);
+    const ArStatus acquired = ArFrame_acquireRawDepthImage16Bits(session, frame, &image);
     if (acquired != AR_SUCCESS) {
         // NOT_YET_AVAILABLE is the ordinary state while ARCore accumulates the
         // motion it needs to estimate depth at all — the user has to move the
@@ -465,7 +500,7 @@ void Subsystem::ReadDepthImage() {
         if (acquired != AR_ERROR_NOT_YET_AVAILABLE && !warnedAboutDepth_) {
             warnedAboutDepth_ = true;
             __android_log_print(ANDROID_LOG_ERROR, kLogTag,
-                                "ArFrame_acquireDepthImage16Bits failed: %s",
+                                "ArFrame_acquireRawDepthImage16Bits failed: %s",
                                 StatusName(acquired));
         }
         return;
@@ -491,6 +526,60 @@ void Subsystem::ReadDepthImage() {
     // 16-bit pixels at. Little-endian matches every arm64 Android device, and
     // the ABI this project builds is arm64 only.
     out.millimetres = reinterpret_cast<const uint16_t*>(bytes);
+
+    // --- the confidence map, which is not an extra ---
+    //
+    // See DepthImage::confidence in the header for why raw depth without this is
+    // half an API. Acquired here rather than lazily because it belongs to THIS
+    // frame: ArFrame_acquireRawDepthConfidenceImage answers DEADLINE_EXCEEDED
+    // once the frame has moved on.
+    //
+    // Best effort. A device that gives depth but refuses confidence still
+    // reconstructs -- the consumer treats a null map as "no opinion", which is
+    // exactly the behaviour we had before this existed -- so this failing is not
+    // a reason to throw the depth away.
+    ArImage* confidence = nullptr;
+    const ArStatus confidenceAcquired =
+            ArFrame_acquireRawDepthConfidenceImage(session, frame, &confidence);
+    if (confidenceAcquired == AR_SUCCESS && confidence != nullptr) {
+        confidenceImage_ = confidence;
+
+        int32_t confidenceWidth = 0;
+        int32_t confidenceHeight = 0;
+        ArImage_getWidth(session, confidence, &confidenceWidth);
+        ArImage_getHeight(session, confidence, &confidenceHeight);
+
+        const uint8_t* confidenceBytes = nullptr;
+        int32_t confidenceLength = 0;
+        ArImage_getPlaneData(session, confidence, 0, &confidenceBytes, &confidenceLength);
+        ArImage_getPlaneRowStride(session, confidence, 0, &out.confidenceRowStrideBytes);
+
+        // The dimensions are checked rather than assumed. ARCore documents all
+        // three depth outputs as identically sized, and if that ever stops being
+        // true the failure is silent and awful: confidence read at the wrong
+        // stride masks a moving diagonal band of the depth map instead of the
+        // pixels it describes. Cheaper to refuse the map than to debug that.
+        if (confidenceBytes != nullptr && confidenceWidth == out.width &&
+            confidenceHeight == out.height) {
+            out.confidence = confidenceBytes;
+        } else {
+            out.confidenceRowStrideBytes = 0;
+            if (!warnedAboutConfidence_) {
+                warnedAboutConfidence_ = true;
+                __android_log_print(ANDROID_LOG_ERROR, kLogTag,
+                                    "RECONPROBE confidence map is %dx%d but depth is %dx%d; "
+                                    "ARCore documents them as equal. Ignoring confidence.",
+                                    confidenceWidth, confidenceHeight, out.width, out.height);
+            }
+        }
+    } else if (confidenceAcquired != AR_ERROR_NOT_YET_AVAILABLE && !warnedAboutConfidence_) {
+        warnedAboutConfidence_ = true;
+        __android_log_print(ANDROID_LOG_ERROR, kLogTag,
+                            "RECONPROBE ArFrame_acquireRawDepthConfidenceImage failed: %s. "
+                            "Raw depth will be fused unfiltered, which on featureless "
+                            "surfaces fuses guesses.",
+                            StatusName(confidenceAcquired));
+    }
 
     // Intrinsics belong to the CPU image, which is several times larger than
     // this one, and NOT the same shape. Getting from one to the other is a crop
@@ -597,9 +686,14 @@ void Subsystem::ReadDepthImage() {
         // be by luck rather than on purpose, so it is worth knowing.
         const int32_t tightStride = out.width * 2;
         __android_log_print(ANDROID_LOG_INFO, kLogTag,
-                            "%s depth %dx%d, stride %d bytes, tight would be %d -> %s",
+                            "%s RAW depth %dx%d, stride %d bytes, tight would be %d -> %s",
                             kProbe, out.width, out.height, out.rowStrideBytes, tightStride,
                             out.rowStrideBytes == tightStride ? "TIGHT" : "PADDED");
+
+        __android_log_print(ANDROID_LOG_INFO, kLogTag,
+                            "%s confidence map %s, stride %d bytes (tight would be %d)",
+                            kProbe, out.confidence != nullptr ? "PRESENT" : "ABSENT",
+                            out.confidenceRowStrideBytes, out.width);
 
         // A mismatch here is NOT a failure any more — it is the measured reality
         // on this hardware (16:9 depth from a 4:3 image) and the rescale handles

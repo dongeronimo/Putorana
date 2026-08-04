@@ -288,6 +288,21 @@ namespace chisel
 
     // Lookup table from the 12 cube edge indices to their corresponding corner
     // indices.
+    // LOCAL MODIFICATION: must stay identical to ChunkManager's cubeIndexOffsets,
+    // which is written there as an Eigen matrix in row order. Transposed to rows
+    // of (x, y, z) here because that is how EdgeKeyFor reads it.
+    int MarchingCubes::cubeCornerOffsets[8][3] =
+    {
+        { 0, 0, 0 },
+        { 1, 0, 0 },
+        { 1, 1, 0 },
+        { 0, 1, 0 },
+        { 0, 0, 1 },
+        { 1, 0, 1 },
+        { 1, 1, 1 },
+        { 0, 1, 1 }
+    };
+
     int MarchingCubes::edgeIndexPairs[12][2] =
     {
         { 0, 1 },

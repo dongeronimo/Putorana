@@ -236,7 +236,7 @@ namespace chisel
 
     }
 
-    void ChunkManager::ExtractInsideVoxelMesh(const ChunkPtr& chunk, const Eigen::Vector3i& index, const Vec3& coords, VertIndex* nextMeshIndex, Mesh* mesh)
+    void ChunkManager::ExtractInsideVoxelMesh(const ChunkPtr& chunk, const Eigen::Vector3i& index, const Vec3& coords, std::unordered_map<uint64_t, VertIndex>* edgeVertices, VertIndex* nextMeshIndex, Mesh* mesh)
     {
         assert(mesh != nullptr);
         Eigen::Matrix<float, 3, 8> cubeCoordOffsets = cubeIndexOffsets.cast<float>() * voxelResolutionMeters;
@@ -261,11 +261,11 @@ namespace chisel
 
         if (allNeighborsObserved)
         {
-            MarchingCubes::MeshCube(cornerCoords, cornerSDF, nextMeshIndex, mesh);
+            MarchingCubes::MeshCube(cornerCoords, cornerSDF, index, edgeVertices, nextMeshIndex, mesh);
         }
     }
 
-    void ChunkManager::ExtractBorderVoxelMesh(const ChunkPtr& chunk, const Eigen::Vector3i& index, const Eigen::Vector3f& coordinates, VertIndex* nextMeshIndex, Mesh* mesh)
+    void ChunkManager::ExtractBorderVoxelMesh(const ChunkPtr& chunk, const Eigen::Vector3i& index, const Eigen::Vector3f& coordinates, std::unordered_map<uint64_t, VertIndex>* edgeVertices, VertIndex* nextMeshIndex, Mesh* mesh)
     {
         const Eigen::Matrix<float, 3, 8> cubeCoordOffsets = cubeIndexOffsets.cast<float>() * voxelResolutionMeters;
         Eigen::Matrix<float, 3, 8> cornerCoords;
@@ -341,7 +341,7 @@ namespace chisel
 
         if (allNeighborsObserved)
         {
-            MarchingCubes::MeshCube(cornerCoords, cornerSDF, nextMeshIndex, mesh);
+            MarchingCubes::MeshCube(cornerCoords, cornerSDF, index, edgeVertices, nextMeshIndex, mesh);
         }
     }
 
@@ -360,6 +360,21 @@ namespace chisel
         VoxelID i = 0;
         VertIndex nextIndex = 0;
 
+        // LOCAL MODIFICATION: grid edge -> the vertex already emitted for it.
+        //
+        // A marching-cubes vertex lives on an edge of the voxel grid, and that
+        // edge is shared by the four cubes around it, so without this every
+        // vertex is emitted up to four times over -- and three times over within
+        // a single cube whose triangles meet. See MarchingCubes::MeshCube.
+        //
+        // Local rather than a member: RecomputeMesh takes a mutex per chunk and
+        // is meant to be callable from more than one thread, and a shared map
+        // would quietly make that false.
+        std::unordered_map<uint64_t, VertIndex> edgeVertices;
+        // A chunk that is full of surface emits on the order of a thousand
+        // vertices. Reserving costs one allocation and saves the rehashing.
+        edgeVertices.reserve(1024);
+
         // For voxels not bordering the outside, we can use a more efficient function.
         for (index.z() = 0; index.z() < maxZ - 1; index.z()++)
         {
@@ -368,7 +383,7 @@ namespace chisel
                 for (index.x() = 0; index.x() < maxX - 1; index.x()++)
                 {
                     i = chunk->GetVoxelID(index.x(), index.y(), index.z());
-                    ExtractInsideVoxelMesh(chunk, index, centroids.at(i) + chunk->GetOrigin(), &nextIndex, mesh);
+                    ExtractInsideVoxelMesh(chunk, index, centroids.at(i) + chunk->GetOrigin(), &edgeVertices, &nextIndex, mesh);
                 }
             }
         }
@@ -381,7 +396,7 @@ namespace chisel
             for (index.y() = 0; index.y() < maxY; index.y()++)
             {
                 i = chunk->GetVoxelID(index.x(), index.y(), index.z());
-                ExtractBorderVoxelMesh(chunk, index, centroids.at(i) + chunk->GetOrigin(), &nextIndex, mesh);
+                ExtractBorderVoxelMesh(chunk, index, centroids.at(i) + chunk->GetOrigin(), &edgeVertices, &nextIndex, mesh);
             }
         }
 
@@ -393,7 +408,7 @@ namespace chisel
             for (index.x() = 0; index.x() < maxX - 1; index.x()++)
             {
                 i = chunk->GetVoxelID(index.x(), index.y(), index.z());
-                ExtractBorderVoxelMesh(chunk, index, centroids.at(i) + chunk->GetOrigin(), &nextIndex, mesh);
+                ExtractBorderVoxelMesh(chunk, index, centroids.at(i) + chunk->GetOrigin(), &edgeVertices, &nextIndex, mesh);
             }
         }
 
@@ -405,14 +420,35 @@ namespace chisel
             for (index.x() = 0; index.x() < maxX; index.x()++)
             {
                 i = chunk->GetVoxelID(index.x(), index.y(), index.z());
-                ExtractBorderVoxelMesh(chunk, index, centroids.at(i) + chunk->GetOrigin(), &nextIndex, mesh);
+                ExtractBorderVoxelMesh(chunk, index, centroids.at(i) + chunk->GetOrigin(), &edgeVertices, &nextIndex, mesh);
             }
         }
 
-        //printf("Generated a new mesh with %lu verts, %lu norm, and %lu idx\n", mesh->vertices.size(), mesh->normals.size(), mesh->indices.size());
+        // LOCAL MODIFICATION: normalise the accumulated face normals.
+        //
+        // MeshCube adds each triangle's unnormalised cross product to all three
+        // of its vertices, so a shared vertex ends up with an area-weighted sum
+        // over the triangles that meet there. That is only the FALLBACK --
+        // ComputeNormalsFromGradients overwrites it with the SDF gradient
+        // wherever the lookup succeeds -- but it has to be a unit vector when
+        // the lookup fails, or the shader normalises a zero-length vector and
+        // gets NaN, which reads as a black hole in the surface.
+        for (Vec3& normal : mesh->normals)
+        {
+            const float magnitude = normal.norm();
+            if (magnitude > 1e-12f)
+            {
+                normal /= magnitude;
+            }
+        }
 
+        // The old assertion here was vertices.size() == indices.size(), which
+        // was true only because upstream emitted a triangle soup. Sharing
+        // vertices is the whole point now, so the invariant is the weaker and
+        // more meaningful one: whole triangles, and no index out of range.
         assert(mesh->vertices.size() == mesh->normals.size());
-        assert(mesh->vertices.size() == mesh->indices.size());
+        assert(mesh->indices.size() % 3 == 0);
+        assert(mesh->vertices.size() <= mesh->indices.size());
     }
 
     bool ChunkManager::GetSDFAndGradient(const Eigen::Vector3f& pos, double* dist, Eigen::Vector3f* grad)

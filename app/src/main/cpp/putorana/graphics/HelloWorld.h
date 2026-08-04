@@ -147,6 +147,27 @@ private:
     bool loggedChunkHistogram_ = false;
 
     /**
+     * Totals behind the deduplication ratio, indices / vertices.
+     *
+     * Summed across chunks rather than averaged per chunk, so a few large
+     * chunks count for what they are instead of being one sample each.
+     * */
+    uint64_t totalChunkVertices_ = 0;
+    uint64_t totalChunkIndices_ = 0;
+
+    /**
+     * Node count at the last growth report.
+     *
+     * The app has now died twice with the graphics allocator out of memory once
+     * a room's worth of chunks accumulated, and both times nothing was watching
+     * the number that explains it. Chunk meshes are never freed -- a chunk that
+     * empties keeps its allocation for when it comes back -- so this only goes
+     * up, and its SLOPE is what says whether a fixed capacity per chunk can work
+     * at all or whether the meshes have to come from a pool.
+     * */
+    size_t lastReportedNodeCount_ = 0;
+
+    /**
      * The camera node, and the AR camera hanging off it. Both non-owning: the
      * tree owns the node and the node owns the camera.
      *
