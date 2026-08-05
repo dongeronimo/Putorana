@@ -121,6 +121,7 @@ add_library(${CMAKE_PROJECT_NAME} SHARED
         arcore_check.cpp
         putorana/Assets.cpp
         putorana/ar/Subsystem.cpp
+        putorana/behavours/BaseBehaviour.cpp
         putorana/graphics/Allocator.cpp
         putorana/graphics/Buffer.cpp
         putorana/graphics/ArCamera.cpp

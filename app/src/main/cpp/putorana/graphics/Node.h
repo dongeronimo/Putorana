@@ -13,7 +13,9 @@
 #include <optional>
 #include <string>
 #include <vector>
-
+namespace putorana::behaviours {
+    class BaseBehaviour;
+}
 namespace putorana::graphics {
 
 /**
@@ -133,7 +135,17 @@ public:
      * worked to produce.
      * */
     std::optional<SpaceChunk> spaceChunk;
+    /**
+     * A node can have zero to many behaviours. They'll be run by the World. The behaviour uses it's
+     * owning node as it's link to the rest of the universe, like the world.
+     * */
+    std::vector<putorana::behaviours::BaseBehaviour*> behaviours = {};
 
+    void runBehavioursStart();
+    void runBehavioursUpdate(float dt);
+    bool hasLateUpdate() const { return anyBehaviourHasLateUpdate; };
+    void runBehavioursLateUpdate(float dt);
+    void runBehavioursDispose();
     // --- transform --------------------------------------------------------
 
     /** Local position, relative to the parent. Mutable in place. */
@@ -276,6 +288,8 @@ public:
 
 private:
     Node() = default;
+
+    bool anyBehaviourHasLateUpdate = false;
 
     glm::quat rotation_{1.0f, 0.0f, 0.0f, 0.0f};
 

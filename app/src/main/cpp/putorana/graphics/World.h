@@ -177,6 +177,8 @@ public:
      * */
     virtual void Update(float deltaSeconds);
 
+    void Visit(Node* node, float dt, std::vector<Node*>& lateNodes);
+
     /**
      * Builds HOW this world draws: its render passes and the wiring between
      * them. Called once, after there is a swapchain, before CreateWorld.

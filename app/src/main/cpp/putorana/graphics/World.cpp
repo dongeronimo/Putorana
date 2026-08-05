@@ -90,19 +90,34 @@ void World::DestroyNode(Node& node) {
 }
 
 void World::Update(float deltaSeconds) {
+    std::vector<Node*> lateNodes = {};
     // Behaviours are driven from inside this traversal, interleaved with the
     // matrix update — see the contract in World.h. Until the Behaviour class
     // exists there is nothing for the delta to feed, and the traversal is
     // purely the matrix pass.
-    (void)deltaSeconds;
+    Visit(root_.get(), deltaSeconds, lateNodes);
 
-    root_->UpdateWorldMatrices();
-
+    for(auto node:lateNodes) {
+        node->runBehavioursLateUpdate(deltaSeconds);
+        node->UpdateWorldMatrices();
+    }
     // Only now, with the traversal finished, is it safe to touch the tree: a
     // node erased mid-walk would invalidate the very vector being iterated.
     FlushPendingDestruction();
 }
 
+void World::Visit(Node* node, float dt, std::vector<Node*>& lateNodes) {
+    node->runBehavioursStart();
+    if(node->hasLateUpdate()) {
+        lateNodes.push_back(node);
+    }
+    node->runBehavioursUpdate(dt);
+    node->UpdateWorldMatrix();
+    auto& children = node->children();
+    for(auto& child:children) {
+        Visit(child.get(), dt, lateNodes);
+    }
+}
 void World::FlushPendingDestruction() {
     if (pendingDestruction_.empty()) {
         return;
@@ -133,6 +148,7 @@ void World::FlushPendingDestruction() {
         // Detach hands back the owning pointer and reset destroys it, taking the
         // subtree with it. Meshes and materials are untouched — they are shared
         // and stay the world's.
+        node->runBehavioursDispose();
         node->Detach().reset();
     }
     pendingDestruction_.clear();

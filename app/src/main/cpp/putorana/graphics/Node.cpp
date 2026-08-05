@@ -1,5 +1,5 @@
 #include "Node.h"
-
+#include "../behavours/BaseBehaviour.h"
 #include <android/log.h>
 
 #include <algorithm>
@@ -277,5 +277,35 @@ glm::mat4 Node::ComputeWorldMatrix() const {
     const glm::mat4 local = LocalMatrix();
     return parent_ != nullptr ? parent_->ComputeWorldMatrix() * local : local;
 }
+
+    void Node::runBehavioursStart() {
+        for(auto b:behaviours) {
+            if(!b->alreadyStarted()) {
+                b->start();
+            }
+            if(b->hasLateUpdate() && !anyBehaviourHasLateUpdate) {
+                anyBehaviourHasLateUpdate = true;
+            }
+        }
+    }
+
+    void Node::runBehavioursUpdate(float dt) {
+        for(auto b:behaviours) {
+            b->update(dt);
+        }
+    }
+
+    void Node::runBehavioursLateUpdate(float dt) {
+        for(auto b:behaviours) {
+            b->runLateUpdate(dt);
+        }
+    }
+
+    void Node::runBehavioursDispose() {
+    for(auto b:behaviours) {
+        b->dispose();
+    }
+
+    }
 
 } // namespace putorana::graphics
