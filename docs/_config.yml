@@ -1,9 +1,8 @@
 title: Putorana
-tagline: A dev diary
 description: >-
   Building an AR space reconstruction on Android: ARCore depth in, a TSDF in the
-  middle, Vulkan out. Written down as it happens, including the parts that were
-  wrong.
+  middle, Vulkan out. One article per problem, including the ones that were
+  solved wrongly first.
 author: dongeronimo
 
 # Project pages are served from a subpath, so baseurl is not optional. Get it
@@ -16,8 +15,25 @@ github_username: dongeronimo
 repository: dongeronimo/Putorana
 
 theme: minima
-show_excerpts: true
 
+# Articles are a collection rather than posts because Jekyll's _posts require a
+# date in the filename and then route and order by it. The unit of writing here
+# is a problem, not a day: some days produce three of these and some produce a
+# third of one, so a date on the front is a claim about the work that is not
+# true. The collection buys undated filenames and a URL that is just the title.
+#
+# `:name` is the filename slug, not the front matter title, so retitling an
+# article does not silently move its URL out from under anyone linking to it.
+collections:
+  articles:
+    output: true
+    permalink: /:name/
+
+# jekyll-feed generates from site.posts and there are none, so the feed is valid
+# and empty. It stays in the list because minima's head.html calls `feed_meta`
+# unconditionally and the build fails on the unknown tag without the plugin
+# loaded. Adding articles to it (`feed: collections: articles:`) would date every
+# item at build time, which republishes the whole archive on every push.
 plugins:
   - jekyll-feed
   - jekyll-seo-tag
@@ -32,11 +48,6 @@ exclude:
   - vendor/
   - .sass-cache/
   - .jekyll-cache/
-
-# Dated diary entries. The URL carries the date because that is what makes an
-# entry findable later: the question asked is usually "what did I do the week
-# the reconstruction started working", not "what was that post called".
-permalink: /:year/:month/:day/:title/
 
 kramdown:
   input: GFM

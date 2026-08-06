@@ -13,8 +13,8 @@ To reconstruct the real world into the virtual world so that I can use this data
   - The space reconstructor is written here, on the CPU, with OpenChisel as a reference rather than a dependency. Why, and the mathematics it rests on: ```app/src/main/cpp/putorana/recon/README.md```.
   - ARCore 1.54, through its C API: tracking, the camera image, and the projection that matches the sensor that took it.
 
-- Dev diary: https://dongeronimo.github.io/Putorana/
-  What was tried, what worked, and what only looked like it would, written up per session and keeping the wrong turns in. Sources in ```docs/```, published by GitHub Pages on every push to main. Conventions for adding an entry: ```docs/README.md```.
+- Articles: https://dongeronimo.github.io/Putorana/
+  What was tried, what worked, and what only looked like it would, one article per problem and keeping the wrong turns in. Sources in ```docs/```, published by GitHub Pages on every push to main. Conventions for adding an article: ```docs/README.md```.
 
 ---
 # Code Convention

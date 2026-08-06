@@ -1,7 +1,11 @@
 ---
-layout: post
+layout: article
 title: "What Fixed the Reconstruction, and What Only Looked Like It Would"
-date: 2026-08-04
+order: 1
+summary: >-
+  Four changes took the reconstruction from 8.7 fps and a wall of lumps to 30 fps
+  and a usable surface. Only one of them was the actual problem, and it was not
+  any of the three that theory pointed at.
 ---
 
 A record of the work that made `putorana::recon` usable, written down because
@@ -19,12 +23,14 @@ same phone, a Galaxy S25, and each section shows the one that belongs to it.
 
 ## Where this starts
 
-The previous session ended with a working pipeline and a bad picture. Raw depth
+The previous session ended with a working pipeline and a bad picture, that proved
+only that the rendering framework functioned as expected and that we could get 
+data from the detached library that wraps openChisel in the project. Raw depth
 was being integrated, chunks were being meshed and drawn, and the result looked
 like this:
 
 <figure>
-  <img src="{{ site.baseurl }}/assets/2026-08-04/Untitled.png"
+  <img src="{{ site.baseurl }}/assets/what-fixed-the-reconstruction/Untitled.png"
        alt="A torn, lumpy reconstruction with floating fragments">
   <figcaption>The state at the start: torn sheets, lumps, floating fragments</figcaption>
 </figure>
@@ -128,9 +134,9 @@ instead of 592.
 The picture got worse in a specific way:
 
 <figure>
-  <img src="{{ site.baseurl }}/assets/2026-08-04/Screenshot_20260804_101732.png"
+  <img src="{{ site.baseurl }}/assets/what-fixed-the-reconstruction/Screenshot_20260804_101732.png"
        alt="A reconstruction with accurate but sparse, hole-ridden surfaces">
-  <figcaption>Gate at 128: faithful and full of holes</figcaption>
+  <figcaption>The bull with gate at 128: faithful and full of holes</figcaption>
 </figure>
 
 The meshes came back much more faithful to the real world, at the cost of holes
@@ -185,7 +191,7 @@ the one thing a weight cannot do.
 Close range became very good:
 
 <figure>
-  <img src="{{ site.baseurl }}/assets/2026-08-04/Screenshot_20260804_102718.png"
+  <img src="{{ site.baseurl }}/assets/what-fixed-the-reconstruction/Screenshot_20260804_102718.png"
        alt="Nearby objects reconstructed with continuous surfaces">
   <figcaption>Close range after weighting</figcaption>
 </figure>
@@ -193,13 +199,13 @@ Close range became very good:
 The floor did not:
 
 <figure>
-  <img src="{{ site.baseurl }}/assets/2026-08-04/Screenshot_20260804_102750.png"
+  <img src="{{ site.baseurl }}/assets/what-fixed-the-reconstruction/Screenshot_20260804_102750.png"
        alt="A floor with mesh at the left edge and none in the middle">
   <figcaption>The floor: covered at the left edge, absent across the middle</figcaption>
 </figure>
 
 <figure>
-  <img src="{{ site.baseurl }}/assets/2026-08-04/Screenshot_20260804_102812.png"
+  <img src="{{ site.baseurl }}/assets/what-fixed-the-reconstruction/Screenshot_20260804_102812.png"
        alt="Patchy mesh coverage scattered across a tiled floor">
   <figcaption>Ragged coverage with no obvious geometric pattern</figcaption>
 </figure>
@@ -223,7 +229,7 @@ produced a hypothesis, and the hypothesis was wrong.
 
 ---
 
-## The measurement that killed the hypothesis
+## Measurements, and the information they gave
 
 The claim was that untextured surfaces produce no depth at all, not bad depth.
 Motion stereo with nothing to match returns zero, which becomes NaN, and no
@@ -255,7 +261,10 @@ the six middle buckets holding 3% to 6% each. ARCore is close to binary about
 whether it knows a distance. The linear weight ramp from 0.05 to 1.00 spends
 almost its entire range on a region that holds a quarter of the samples, which
 means it does far less work than its design suggested. In practice it behaves as
-a gate at 32 with the confident samples weighted near 1.
+a gate at 32 with the confident samples weighted near 1. I suspect that this is due
+to the data the creators of openChisel had, a Project Tango device with actual depth
+sensors, while my Samsumg lacks real depth sensors and rely on paralax plus sensor data
+like the gyroscope and accelerometer to calculate synthetic depth data.
 
 ---
 
@@ -277,7 +286,7 @@ second. It never cleared.
 And a picture taken a few minutes earlier fitted:
 
 <figure>
-  <img src="{{ site.baseurl }}/assets/2026-08-04/Screenshot_20260804_111334.png"
+  <img src="{{ site.baseurl }}/assets/what-fixed-the-reconstruction/Screenshot_20260804_111334.png"
        alt="A meshed plush ox ending abruptly along a straight horizontal edge">
   <figcaption>The plush ox, cut off along a clean line at a chunk boundary</figcaption>
 </figure>
@@ -306,8 +315,7 @@ every chunk it touches, so with the camera held reasonably still the same set is
 re-inserted every frame into the same buckets.
 
 The loop therefore drained the same low-bucket chunks over and over and never
-reached the high-bucket ones. **The budget was never the constraint. The ordering
-was.**
+reached the high-bucket ones. **It would never reach the other buckets**
 
 This accounts for all three symptoms at once:
 
@@ -336,13 +344,13 @@ The backlog now moves. It drains to 8 and refills toward 116 instead of sitting
 at 129.
 
 <figure>
-  <img src="{{ site.baseurl }}/assets/2026-08-04/Screenshot_20260804_112807.png"
+  <img src="{{ site.baseurl }}/assets/what-fixed-the-reconstruction/Screenshot_20260804_112807.png"
        alt="A pedestal fan reconstructed from several angles">
   <figcaption>A fan meshed in the round, with the corner and wall closing around it</figcaption>
 </figure>
 
 <figure>
-  <img src="{{ site.baseurl }}/assets/2026-08-04/Screenshot_20260804_112726.png"
+  <img src="{{ site.baseurl }}/assets/what-fixed-the-reconstruction/Screenshot_20260804_112726.png"
        alt="An unbroken mesh running from the floor up the wall">
   <figcaption>Continuous surface across floor and wall</figcaption>
 </figure>
@@ -357,9 +365,8 @@ at 129.
 
 Chunk mesh capacity was checked along the way and never came close to binding:
 `203 0 0 0 0 0 0 0` in buckets of 512, with zero of 204 remeshes exceeding the
-1024 vertex limit. Worth stating because it was blamed twice.
+1024 vertex limit. 
 
-The GPU was never the problem and still is not. It finishes a frame in 0.82 ms.
 
 ---
 
@@ -382,7 +389,7 @@ measurement pointing at it. The bimodal confidence distribution means a weight
 curve that separates the two modes should be worth more than any truncation
 tuning.
 
-### Space carving is broken, and it is a bug rather than a setting
+### Space carving is still broken due to a bug
 
 `DistVoxel::Carve()` reads:
 
@@ -425,13 +432,12 @@ been evaluated on its own.
 
 ---
 
-## What not to try again
-
-Written as a list because the cost of rediscovering any of these is a session.
+## What does not work and should be avoided going forward
 
 1. **Do not raise the confidence gate toward 128.** Measured at 79% rejection,
    and the surfaces it deletes are the ones a floor is made of. The gate is an
-   outlier filter now. Quality lives in the weight.
+   outlier filter now. Quality lives in the weight, as it should if we go by the
+   paper.
 2. **Do not blame chunk mesh capacity for a memory or coverage problem.** It was
    blamed twice. The overflow counter reads `203 0 0 0 0 0 0 0` with zero
    exceeding 1024. The OOM was `Chunk::AllocateDistVoxels`, and the stack trace
@@ -439,11 +445,15 @@ Written as a list because the cost of rediscovering any of these is a session.
 3. **Do not trust `Chisel.h` to respect the configured far plane.**
    `IntegrateDepthScan` calls `GetStats` and builds its frustum from the maximum
    value in the image. A single stray uint16 can claim 65 metres, frustum volume
-   goes with the cube of depth, and the process reached 1.1 GB. The clamp in our
-   own conversion loop is what keeps this from returning.
+   goes with the cube of depth, and the process reached 1.1 GB and even though we are
+   running this in a S25 memory is precious. The clamp in our own conversion loop 
+   is what keeps this from returning.
 4. **Do not tune `parallel_for`.** Its `threshold = 1000` means it spawns no
    threads at all at the sizes this app operates on. The integrator is
-   single-threaded today whether or not anyone intended that.
+   single-threaded today whether or not anyone intended that. Maybe we should make it
+   multi-threaded? I don't know, we'll have to do an A/B test and I suspect we won't
+   really need multithread until we get to multiplayer and we have to integrate many 
+   views at the same time (depends on how we will syncronize the clients, TBD)
 5. **Do not measure a capacity under one truncation and then change the
    truncation.** That happened, and it is how the 1024 vertex capacity came to be
    exceeded by 51 chunks out of 204 in the four change experiment.
@@ -453,13 +463,13 @@ Written as a list because the cost of rediscovering any of these is a session.
 ## Why this matters for what comes next
 
 The surface is now good enough that the remaining noise can be attacked **on the
-mesh** rather than in the field. Decimation or smoothing over chunk meshes is a
-pure, wide, fixed-output-size operation, which is the shape a compute shader
-wants. `recon/README.md` already identifies marching cubes over dirty chunks as
-the first good candidate for migration off the CPU, and a smoothing pass sits
-directly beside it in the same pipeline stage.
+mesh** rather than in the field, if we deign it necessary . Decimation or smoothing 
+over chunk meshes is a pure, wide, fixed-output-size operation, which is the shape 
+a compute shader wants. `recon/README.md` already identifies marching cubes over 
+dirty chunks as the first good candidate for migration off the CPU, and a smoothing 
+pass sits directly beside it in the same pipeline stage.
 
-That option did not exist this morning. A smoothing pass over a mesh with holes
+That option did not exist before. A smoothing pass over a mesh with holes
 in it, and with entire chunks missing for reasons nobody had diagnosed, would
 have smoothed the wrong thing and hidden the starvation bug behind a nicer
 looking surface.

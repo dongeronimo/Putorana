@@ -60,3 +60,33 @@ table {
 blockquote {
   font-style: normal;
 }
+
+// The index. Minima's post list styles the date and leaves the title inheriting
+// link colour at body size, which was fine when the date carried the scanning.
+// With no date the title has to do that work alone, so it gets the size.
+.article-list {
+  list-style: none;
+  margin-left: 0;
+
+  > li {
+    margin-bottom: $spacing-unit;
+  }
+}
+
+.article-list-title {
+  font-size: $base-font-size * 1.25;
+  font-weight: 600;
+}
+
+.article-list-summary {
+  margin-top: $spacing-unit * 0.15;
+  margin-bottom: 0;
+  color: $grey-color-dark;
+}
+
+// Back to the index from the foot of an article. Quiet, because it sits under
+// the last thing the article had to say.
+.post-nav {
+  margin-top: $spacing-unit * 1.5;
+  font-size: $small-font-size;
+}
