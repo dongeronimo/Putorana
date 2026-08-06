@@ -37,8 +37,8 @@ uint32_t VertexStrideFor(VertexFormat format) {
     switch (format) {
         case VertexFormat::Skinned:
             return sizeof(SkinnedVertex);
-        case VertexFormat::PositionNormal:
-            return sizeof(PositionNormalVertex);
+        case VertexFormat::Reconstructed:
+            return sizeof(ReconstructedVertex);
         case VertexFormat::Static:
             break;
     }
@@ -49,8 +49,8 @@ const char* VertexFormatName(VertexFormat format) {
     switch (format) {
         case VertexFormat::Skinned:
             return "skinned";
-        case VertexFormat::PositionNormal:
-            return "position+normal";
+        case VertexFormat::Reconstructed:
+            return "reconstructed";
         case VertexFormat::Static:
             break;
     }
@@ -93,14 +93,23 @@ VertexInput VertexInputFor(VertexFormat format) {
     // Position and normal are declared once, above, for every format. They are
     // at the same offsets in all three vertex structs, which is what lets this
     // function share them instead of branching three ways.
-    static_assert(offsetof(StaticVertex, position) == offsetof(PositionNormalVertex, position));
-    static_assert(offsetof(StaticVertex, normal) == offsetof(PositionNormalVertex, normal));
+    static_assert(offsetof(StaticVertex, position) == offsetof(ReconstructedVertex, position));
+    static_assert(offsetof(StaticVertex, normal) == offsetof(ReconstructedVertex, normal));
 
-    if (format == VertexFormat::PositionNormal) {
-        // Stops at two. There is no UV in this format, and declaring location 2
-        // anyway would have the pipeline read 8 bytes past the end of the last
-        // vertex in the buffer.
-        input.attributeCount = 2;
+    if (format == VertexFormat::Reconstructed) {
+        // No location 2. There is no UV in this format, and declaring one anyway
+        // would have the pipeline read 8 bytes past the end of the last vertex
+        // in the buffer.
+        //
+        // UNORM, not UINT: these are colour channels and the shader wants them
+        // as a vec4 in [0, 1], not as integers. The fourth is the confidence
+        // that goes with the first three — see ReconstructedVertex.
+        input.attributes[2].location = 5;
+        input.attributes[2].binding = 0;
+        input.attributes[2].format = VK_FORMAT_R8G8B8A8_UNORM;
+        input.attributes[2].offset = offsetof(ReconstructedVertex, color);
+
+        input.attributeCount = 3;
         return input;
     }
 

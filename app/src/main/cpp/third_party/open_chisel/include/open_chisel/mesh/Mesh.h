@@ -47,6 +47,7 @@ namespace chisel
                 vertices.clear();
                 normals.clear();
                 colors.clear();
+                colorWeights.clear();
                 indices.clear();
             }
 
@@ -54,6 +55,20 @@ namespace chisel
             VertIndexList indices;
             Vec3List normals;
             Vec3List colors;
+
+            // LOCAL ADDITION: how much colour evidence stands behind each entry
+            // of `colors`, normalised to [0, 1].
+            //
+            // `colors` alone cannot answer that. A voxel nobody has seen in
+            // colour interpolates to (0, 0, 0), and so does a black surface that
+            // has been seen a hundred times. Telling them apart is what lets a
+            // renderer fall back to a flat colour where the reconstruction has
+            // geometry but no colour yet, instead of painting those regions
+            // black and calling it data.
+            //
+            // Filled by ColorizeMesh alongside `colors`, so it is empty in
+            // exactly the cases `colors` is.
+            std::vector<float> colorWeights;
 
     };
     typedef std::shared_ptr<Mesh> MeshPtr;

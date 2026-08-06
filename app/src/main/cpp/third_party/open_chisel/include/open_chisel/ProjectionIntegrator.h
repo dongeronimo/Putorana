@@ -29,6 +29,7 @@
 #include <open_chisel/camera/PinholeCamera.h>
 #include <open_chisel/camera/DepthImage.h>
 #include <open_chisel/camera/ColorImage.h>
+#include <open_chisel/camera/YuvColorImage.h>
 #include <open_chisel/Chunk.h>
 
 #include <open_chisel/truncation/Truncator.h>
@@ -181,6 +182,39 @@ namespace chisel
 
                             voxel.Integrate(surfaceDist, weight, maxWeight);
                             updated = true;
+
+                            // LOCAL ADDITION: colour, fused here rather than in
+                            // IntegrateColor.
+                            //
+                            // IntegrateColor is a parallel copy of this function
+                            // that received NONE of the corrections in this file:
+                            // it still pads the band by two voxel diagonals, still
+                            // ignores the per-pixel confidence weights, still has
+                            // no weight ceiling, and still carries the carve
+                            // eligibility test that cannot remove a surface.
+                            // Calling it would not add colour to this
+                            // reconstruction, it would replace this reconstruction
+                            // with a worse one that has colour.
+                            //
+                            // So colour lives here, and it costs almost nothing:
+                            // the voxel is already known to be in the band, the
+                            // projection is already done, and the colour pixel is
+                            // an affine map of it. See YuvColorImage.
+                            //
+                            // Gated on the SAME confidence weight the geometry
+                            // uses. A sample not trusted to say where the surface
+                            // is should not be trusted to say what colour it is:
+                            // both come from the same stereo match, and a bad
+                            // match reads the colour of whatever it landed on.
+                            if (colorImage.IsValid() && chunk->HasColors() &&
+                                weight >= colorMinWeight)
+                            {
+                                uint8_t rgb[3];
+                                colorImage.SampleAtDepthPixel(cameraPos(0), cameraPos(1), rgb);
+                                chunk->GetColorVoxelMutable(i).Integrate(rgb[0], rgb[1], rgb[2], 1,
+                                                                         colorMaxWeight);
+                                ++coloredVoxels;
+                            }
                         }
                     }
                     else if (enableVoxelCarving && surfaceDist > truncation + diag + carvingDist)
@@ -232,6 +266,21 @@ namespace chisel
                             if (voxel.GetWeight() <= 0.0f)
                             {
                                 ++clearedVoxels;
+
+                                // LOCAL ADDITION: the colour goes with it.
+                                //
+                                // DistVoxel::Carve just Reset this voxel to
+                                // unobserved, and the ColorVoxel at the same index
+                                // knows nothing about that -- they are two arrays
+                                // sharing an index, not one object. Without this
+                                // the colour of whatever used to be here survives
+                                // its own geometry, and the next thing to occupy
+                                // the voxel is fused against a stale average of a
+                                // surface that is gone.
+                                if (chunk->HasColors())
+                                {
+                                    chunk->GetColorVoxelMutable(i).Reset();
+                                }
                             }
                             updated = true;
                         }
@@ -348,6 +397,29 @@ namespace chisel
             inline void ClearWeights() { weights.reset(); }
 
             /**
+             * LOCAL ADDITION: this frame's colour image, and the affine map from
+             * a depth pixel to a pixel of it. Default constructed means no colour
+             * is fused, which is upstream's behaviour for this code path.
+             *
+             * BORROWED, and held by value only because the struct is nothing but
+             * pointers and eight numbers. The planes belong to the capture API
+             * and are reclaimed on the next frame, so this MUST be set every
+             * frame that has an image and cleared on every frame that does not.
+             * The alternative -- a shared_ptr like `weights` -- would suggest an
+             * ownership this class cannot have over memory it did not allocate.
+             * */
+            inline void SetColorImage(const YuvColorImage& image) { colorImage = image; }
+            inline void ClearColorImage() { colorImage = YuvColorImage(); }
+
+            /**
+             * LOCAL ADDITION: the confidence weight a depth sample needs before
+             * its colour is fused, and the ceiling on a ColorVoxel's accumulated
+             * weight. See the call sites in Integrate.
+             * */
+            inline void SetColorMinWeight(float value) { colorMinWeight = value; }
+            inline void SetColorMaxWeight(uint8_t value) { colorMaxWeight = value; }
+
+            /**
              * LOCAL ADDITION: ceiling on accumulated per-voxel weight. 0 keeps
              * upstream's unbounded running mean. See DistVoxel::Integrate.
              * */
@@ -384,11 +456,16 @@ namespace chisel
             inline uint32_t GetCarvedVoxels() const { return carvedVoxels; }
             inline uint32_t GetClearedVoxels() const { return clearedVoxels; }
             inline uint32_t GetNearFrontVoxels() const { return nearFrontVoxels; }
+
+            /** LOCAL ADDITION: voxels that received a colour sample this frame. */
+            inline uint32_t GetColoredVoxels() const { return coloredVoxels; }
+
             inline void ResetVoxelCounters() const
             {
                 carvedVoxels = 0;
                 clearedVoxels = 0;
                 nearFrontVoxels = 0;
+                coloredVoxels = 0;
             }
 
         protected:
@@ -402,11 +479,18 @@ namespace chisel
             float carvingDecay = 0.85f;
             float carvingMinWeight = 0.5f;
 
+            YuvColorImage colorImage;
+            float colorMinWeight = 0.0f;
+            // 0 restores upstream's unbounded mean. Anything above 0 is a running
+            // average that stays correctable; see ColorVoxel::Integrate.
+            uint8_t colorMaxWeight = 0;
+
             // Mutable so Integrate can stay const. See the accessors above for
             // why unsynchronised counters are safe in this configuration.
             mutable uint32_t carvedVoxels = 0;
             mutable uint32_t clearedVoxels = 0;
             mutable uint32_t nearFrontVoxels = 0;
+            mutable uint32_t coloredVoxels = 0;
     };
 
 } // namespace chisel 

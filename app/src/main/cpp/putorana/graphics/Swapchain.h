@@ -95,6 +95,29 @@ private:
     std::vector<VkSemaphore> renderFinished_;
 };
 
+/**
+ * True for the _SRGB colour formats the swapchain is willing to choose.
+ *
+ * ## Every shader that writes colour has to ask this
+ *
+ * With an _SRGB attachment the hardware encodes on write and decodes on sample,
+ * so a shader hands over and receives LINEAR values. With a _UNORM one nothing
+ * happens in either direction and the same shader has to hand over gamma-encoded
+ * values instead. Getting it backwards is not subtle at the dark end: a linear
+ * value written to _UNORM is the classic washed-out picture, and a gamma value
+ * written to _SRGB is the equally classic muddy one.
+ *
+ * The _SRGB entries are preferred, so this is normally true. It is not a
+ * constant, because the fallbacks in ChooseFormat are real and a surface is only
+ * required to expose one format of any kind.
+ *
+ * Lives here rather than in each pass because the format is chosen here, and
+ * because two passes deciding this independently is two places to get it wrong:
+ * the camera feed and the reconstruction drawn in front of it must agree, or the
+ * geometry reads as a different colour from the pixels around it.
+ * */
+bool IsSrgbFormat(VkFormat format);
+
 } // namespace putorana::graphics
 
 #endif //PUTORANA_GRAPHICS_SWAPCHAIN_H

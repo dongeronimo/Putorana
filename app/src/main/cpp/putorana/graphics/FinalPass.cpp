@@ -13,16 +13,6 @@ namespace {
 constexpr const char* kVertexShader = "shaders/fullscreen.vert.spv";
 constexpr const char* kFragmentShader = "shaders/composite.frag.spv";
 
-/** True for the _SRGB colour formats the swapchain is willing to choose. */
-bool IsSrgb(VkFormat format) {
-    switch (format) {
-        case VK_FORMAT_R8G8B8A8_SRGB:
-        case VK_FORMAT_B8G8R8A8_SRGB:
-            return true;
-        default:
-            return false;
-    }
-}
 
 void SetImageBarrier(VkCommandBuffer commandBuffer, VkImage image, VkImageLayout oldLayout,
                      VkImageLayout newLayout, VkPipelineStageFlags2 srcStage,
@@ -56,7 +46,10 @@ std::unique_ptr<FinalPass> FinalPass::Create(Device& device, VkFormat targetForm
                                              std::string& error) {
     auto pass = std::unique_ptr<FinalPass>(new FinalPass());
     pass->handle_ = device.handle();
-    pass->push_.srgbTarget = IsSrgb(targetFormat) ? 1 : 0;
+    // Shared with ChunkMaterial through Swapchain.h, deliberately: the feed and
+    // the reconstruction drawn over it have to make the same decision, and two
+    // copies of this switch is one of them going stale.
+    pass->push_.srgbTarget = IsSrgbFormat(targetFormat) ? 1 : 0;
 
     // The stand-in for the camera planes. One texel, cleared to black on first
     // use, and only ever sampled on frames where the mix factor is 1 and its

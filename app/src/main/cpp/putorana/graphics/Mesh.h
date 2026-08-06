@@ -27,23 +27,42 @@ enum class VertexFormat {
     Static,
     Skinned,
     /**
-     * Position and normal, nothing else. For geometry that is generated rather
-     * than authored — the reconstruction's chunk meshes — where there is no
-     * texture and therefore no UV to store.
+     * Position, normal and a packed colour. For geometry that is GENERATED
+     * rather than authored: the reconstruction's chunk meshes, and nothing else
+     * in this app.
      *
-     * It exists because the alternative was writing 8 bytes of zeroes per vertex
-     * that no shader ever reads. That is 25% of the largest buffer in the app: a
-     * room at 4cm voxels is on the order of a million reconstructed vertices, so
-     * the UV lane alone would be ~8 MB of a phone's budget, plus its share of
-     * every byte of upload traffic on every remesh.
+     * ## Why it is not just the static format
      *
-     * The cost is a second pipeline, because vertex input layout is baked into
-     * one. That in turn means a second material with a good deal of duplication
-     * against FlatColorMaterial — a deliberate, known debt to be paid off by
-     * factoring the common pipeline setup out later, not by carrying dead lanes
-     * forever.
+     * Generated geometry has no texture, so it has no UV, and writing 8 bytes of
+     * zeroes per vertex that no shader ever reads is 25% of the largest buffer
+     * in the app. A room at 4cm voxels is on the order of a million reconstructed
+     * vertices, so the UV lane alone would be ~8 MB of a phone's budget, plus its
+     * share of every byte re-uploaded on every remesh.
+     *
+     * What it has instead is a colour: the reconstruction fuses what the camera
+     * saw at each voxel, and there is nowhere else to put that. A texture would
+     * need the UV this format exists to avoid.
+     *
+     * ## Why colour lives in THIS format rather than a fourth one
+     *
+     * This format has exactly one producer and one consumer, and always has:
+     * OpenChiselWorld creates it, ChunkMaterial draws it. It is not "position and
+     * normal", it is "reconstructed geometry", and reconstructed geometry has
+     * colour. Adding a fourth format would have bought a second material, a
+     * second pipeline and a third copy of ~130 lines of pipeline state, to
+     * describe the same geometry.
+     *
+     * The confidence byte is what makes one format enough for both cases. With
+     * the reconstruction's colour disabled it is zero everywhere, the shader
+     * falls back to the material's flat colour, and the app draws exactly what it
+     * drew before colour existed, with no branch in C++ and no second pipeline.
+     *
+     * The cost is a second pipeline against the static format, because vertex
+     * input layout is baked into one, and with it a second material duplicating
+     * FlatColorMaterial. That debt is unchanged by colour and is still to be paid
+     * off by factoring the common pipeline setup out, not by carrying dead lanes.
      * */
-    PositionNormal,
+    Reconstructed,
 };
 
 enum class MeshStorage {
@@ -72,19 +91,42 @@ struct StaticVertex {
 static_assert(sizeof(StaticVertex) == 32, "StaticVertex must stay tightly packed at 32 bytes");
 
 /**
- * 24 bytes. The generated-geometry format — see VertexFormat::PositionNormal.
+ * 28 bytes. The generated-geometry format — see VertexFormat::Reconstructed.
  *
  * Position and normal sit at the same offsets as StaticVertex's, deliberately.
  * Anything that only wants those two (bounds, culling, a depth-only pass) reads
  * both formats with the same offsets and only a different stride, which is the
  * same invariant the static_asserts in Mesh.cpp protect for SkinnedVertex.
+ *
+ * ## The colour, and the byte that is not padding
+ *
+ * RGB as it came off the camera, GAMMA ENCODED, which is what an 8-bit channel
+ * should hold: linear 8-bit bands visibly in the darks, and indoors is where a
+ * camera feed spends much of its range. mesh_chunk.frag linearises on the way
+ * out, with the same function composite.frag uses on the feed itself.
+ *
+ * Three floats would put this at 36 bytes and carry no more information: the
+ * source is an 8-bit sensor and the destination is an 8-bit swapchain.
+ *
+ * The fourth byte is how much colour evidence stands behind the first three.
+ * It exists because (0, 0, 0) cannot distinguish a black surface from a voxel
+ * nobody has seen in colour, and the shader needs to tell them apart to know
+ * whether to trust the colour or fall back to the material's.
+ *
+ * Mirrored by recon::Vertex, which is what actually fills it. The two are held
+ * together by static_asserts in OpenChiselWorld.cpp — that separation, and why
+ * it cannot be collapsed, is explained on recon::Vertex.
  * */
-struct PositionNormalVertex {
+struct ReconstructedVertex {
     glm::vec3 position;
     glm::vec3 normal;
+    uint8_t color[4];
 };
-static_assert(sizeof(PositionNormalVertex) == 24,
-              "PositionNormalVertex must stay tightly packed at 24 bytes");
+static_assert(sizeof(ReconstructedVertex) == 28,
+              "ReconstructedVertex must stay tightly packed at 28 bytes");
+static_assert(alignof(ReconstructedVertex) == 4,
+              "ReconstructedVertex must not pick up wider alignment — the stride and every "
+              "region offset in this file assume 4");
 
 /**
  * 52 bytes: the static layout, a quad of joint indices and four float weights.
@@ -156,11 +198,22 @@ struct VertexInput {
 };
 
 /**
- * The vertex input state for a format. Shader locations are fixed and shared by
- * both formats, so a shader written against Static reads correctly from a
- * Skinned mesh and simply ignores locations 3 and 4:
+ * The vertex input state for a format. Shader locations are fixed across every
+ * format, so a shader written against Static reads correctly from a Skinned mesh
+ * and simply ignores locations 3 and 4:
  *
- *   0 position   1 normal   2 uv   3 boneIds   4 weights
+ *   0 position   1 normal   2 uv   3 boneIds   4 weights   5 colour
+ *
+ * Colour takes 5 rather than the 2 it could have, because Reconstructed has no
+ * UV to conflict with. The point is that a location number means ONE thing
+ * everywhere: location 2 is a UV in every shader in this project, so a colour
+ * can never be read as one. Neither choice is safer against a mismatched
+ * pipeline — an unbound location 2 and a location 2 bound to the wrong type are
+ * both undefined values with no diagnostic — but only one of them keeps the
+ * table above readable as a fact rather than as a per-format lookup.
+ *
+ * The attribute ARRAY index is not the location. Reconstructed fills slots 0..2
+ * with locations 0, 1 and 5.
  * */
 VertexInput VertexInputFor(VertexFormat format);
 

@@ -9,6 +9,7 @@
 
 #include <android/log.h>
 
+#include <cstddef>
 #include <utility>
 
 using namespace putorana::graphics;
@@ -19,6 +20,29 @@ namespace {
 
 constexpr const char* kLogTag = "ARReconstructor";
 constexpr const char* kChunkMaterialName = "ReconChunk";
+
+// --- the seam between recon and graphics ---
+//
+// recon::Vertex and graphics::ReconstructedVertex describe the same 28 bytes and
+// are declared twice on purpose: graphics/Mesh.h includes volk.h and
+// putorana::recon may not, so neither namespace can use the other's struct. This
+// is the one translation unit that sees both, which makes it the only place the
+// duplication can be checked.
+//
+// It was checked nowhere at all until colour arrived, and the header comment
+// claiming otherwise was aspirational. Two members that were both "position then
+// normal" made a drift unlikely; three, one of them a packed byte quad, do not.
+// A mismatched offset here is colour read from the normal's bytes, silently.
+static_assert(sizeof(recon::Vertex) == sizeof(ReconstructedVertex),
+              "recon::Vertex and graphics::ReconstructedVertex must be the same size");
+static_assert(alignof(recon::Vertex) == alignof(ReconstructedVertex),
+              "recon::Vertex and graphics::ReconstructedVertex must have the same alignment");
+static_assert(offsetof(recon::Vertex, position) == offsetof(ReconstructedVertex, position),
+              "position must sit at the same offset in both vertex structs");
+static_assert(offsetof(recon::Vertex, normal) == offsetof(ReconstructedVertex, normal),
+              "normal must sit at the same offset in both vertex structs");
+static_assert(offsetof(recon::Vertex, color) == offsetof(ReconstructedVertex, color),
+              "colour must sit at the same offset in both vertex structs");
 
 /**
  * Chunks remeshed per frame. Integration marks the whole 3x3x3 neighbourhood of
@@ -62,6 +86,22 @@ constexpr uint32_t kChunkVertexCapacity = 1024;
  * (which was correct for a soup) would make every chunk overflow and be dropped.
  * */
 constexpr uint32_t kChunkIndexCapacity = kChunkVertexCapacity * 5;
+
+/**
+ * How far to trust the camera colour the reconstruction puts on each vertex.
+ *
+ * 1 is the point of all this. **Set it to 0 when the reconstruction looks wrong**
+ * and you need to know whether the fault is the geometry or the colour on it.
+ *
+ * That is not a general-purpose brightness knob, it is a diagnostic, and the
+ * reason it earns a constant here rather than living inside ChunkMaterial is that
+ * camera colour is drawn nearly unlit -- it already contains the room's real
+ * lighting -- and unlit shading hides exactly what the hardcoded directional
+ * light was chosen to expose. A surface that is noisy, inside out, or facing the
+ * wrong way is obvious under that light and invisible under a photograph of
+ * itself. Zero here puts the light back.
+ * */
+constexpr float kChunkColorMix = 1.0f;
 
 } // namespace
 
@@ -121,6 +161,16 @@ bool OpenChiselWorld::CreateWorld(std::string& error) {
         if (material == nullptr) {
             return false;
         }
+        // The flat blue above is no longer what the reconstruction looks like.
+        // It is the fallback, drawn only where a vertex has geometry but no
+        // camera colour behind it yet, which is every vertex on the frame it
+        // first appears and fewer of them every second after.
+        material->SetColorMix(kChunkColorMix);
+        // What encoding the mesh pass's attachment wants. CreateRenderPasses has
+        // already run, so the format is settled by now — and it has to come from
+        // the pass rather than be assumed, because the swapchain's _SRGB
+        // preference has _UNORM fallbacks behind it.
+        material->SetSrgbTarget(IsSrgbFormat(meshPass->colorFormat()));
         chunkMaterial = AddMaterial(kChunkMaterialName, std::move(material));
 
         recon::Config reconConfig;
@@ -197,7 +247,11 @@ void OpenChiselWorld::UpdateReconstruction(const ar::CameraFrame& frame) {
         return;
     }
 
-    reconstruction->Integrate(frame.depth, frame.sensorPose);
+    // The whole frame, not its pieces. Depth, colour and pose have to come from
+    // one frame or the colour lands on geometry the phone has already moved away
+    // from, and Reconstruction is where the choice of sensor pose over display
+    // pose belongs. See Reconstruction::Integrate.
+    reconstruction->Integrate(frame);
     reconstruction->Remesh(kRemeshBudgetPerFrame);
     reconstruction->CollectUpdates(chunkChanged, chunkRemoved);
 
@@ -230,7 +284,7 @@ void OpenChiselWorld::UpdateReconstruction(const ar::CameraFrame& frame) {
         if (entry.mesh == nullptr) {
             MeshDesc desc;
             desc.name = "chunk";
-            desc.format = VertexFormat::PositionNormal;
+            desc.format = VertexFormat::Reconstructed;
             // Mutable: written again every time the chunk is remeshed, which
             // happens for as long as the sensor keeps seeing it.
             desc.storage = MeshStorage::Mutable;

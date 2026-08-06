@@ -5,6 +5,8 @@
 
 #include <android/log.h>
 
+#include <algorithm>
+
 namespace putorana::graphics {
 
 namespace {
@@ -14,10 +16,21 @@ constexpr const char* kLogTag = "ARReconstructor";
 constexpr const char* kVertexShader = "shaders/mesh_chunk.vert.spv";
 constexpr const char* kFragmentShader = "shaders/mesh_chunk.frag.spv";
 
-/** Matches the MaterialParams block in mesh_chunk.frag. */
+/**
+ * Matches the MaterialParams block in mesh_chunk.frag, std140.
+ *
+ * `color` at offset 0, `colorMix` at 16 and `srgbTarget` at 20, which is what
+ * std140 gives a vec4 followed by a float and an int. The trailing padding is
+ * explicit rather than implied so that adding a member cannot silently land
+ * in it.
+ * */
 struct Params {
     glm::vec4 color{1.0f};
+    float colorMix = 1.0f;
+    int32_t srgbTarget = 1;
+    int32_t padding_[2] = {};
 };
+static_assert(sizeof(Params) == 32, "Params must match the std140 layout in mesh_chunk.frag");
 
 } // namespace
 
@@ -72,6 +85,11 @@ std::unique_ptr<ChunkMaterial> ChunkMaterial::Create(Device& device, const glm::
     return material;
 }
 
+void ChunkMaterial::Write() {
+    const Params params{color_, colorMix_, srgbTarget_ ? 1 : 0, {}};
+    params_->Write(&params, sizeof(params));
+}
+
 ChunkMaterial::~ChunkMaterial() {
     if (setLayout_ != VK_NULL_HANDLE) {
         vkDestroyDescriptorSetLayout(handle_, setLayout_, nullptr);
@@ -80,8 +98,18 @@ ChunkMaterial::~ChunkMaterial() {
 }
 
 void ChunkMaterial::SetColor(const glm::vec4& color) {
-    const Params params{color};
-    params_->Write(&params, sizeof(params));
+    color_ = color;
+    Write();
+}
+
+void ChunkMaterial::SetColorMix(float mix) {
+    colorMix_ = std::clamp(mix, 0.0f, 1.0f);
+    Write();
+}
+
+void ChunkMaterial::SetSrgbTarget(bool srgb) {
+    srgbTarget_ = srgb;
+    Write();
 }
 
 MaterialPipeline ChunkMaterial::CreatePipeline(const PipelineContext& context,
@@ -105,10 +133,10 @@ MaterialPipeline ChunkMaterial::CreatePipeline(const PipelineContext& context,
     // of drawing chunk geometry through a static-format pipeline is a shader
     // reading an attribute the pipeline never bound, which is undefined values
     // rather than an error, and it looks like broken normals.
-    if (format != VertexFormat::PositionNormal) {
+    if (format != VertexFormat::Reconstructed) {
         __android_log_print(ANDROID_LOG_WARN, kLogTag,
                             "ChunkMaterial asked for a '%s' pipeline; its shaders declare only "
-                            "position and normal",
+                            "position, normal and colour",
                             VertexFormatName(format));
     }
 

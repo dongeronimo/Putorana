@@ -496,79 +496,149 @@ namespace chisel
         }
     }
 
-    Vec3 ChunkManager::InterpolateColor(const Vec3& colorPos)
+    // LOCAL MODIFICATION: this function was dimensionally wrong in two places and
+    // could not have produced a correct colour.
+    //
+    // Upstream computed the eight corner indices as `floor(x / resolution)`, which
+    // is a VOXEL INDEX, and then passed them straight to GetColorVoxel, which
+    // takes a position in METRES. At 4 cm voxels that looks up a point 25 times
+    // further from the origin than the one asked for. The eight lookups therefore
+    // almost always landed in chunks that do not exist, the null test below fired,
+    // and every call fell through to the nearest-neighbour fallback -- so the
+    // trilinear path was dead code that, on the rare frame all eight indices
+    // happened to hit allocated chunks, returned the colour of an unrelated corner
+    // of the room.
+    //
+    // The interpolation weights had the same fault: `(x - x_0) / (x_1 - x_0)` is
+    // metres minus an index over one, so even with the lookups fixed the blend
+    // would have been meaningless.
+    //
+    // The grid is also not the one upstream indexed. A voxel's colour belongs at
+    // its CENTROID, which CacheCentroids places at (index + 0.5) * resolution, and
+    // marching cubes interpolates its vertices along edges of that same centroid
+    // grid. So the cell containing a mesh vertex has lower corner
+    // floor(p / resolution - 0.5), not floor(p / resolution). Getting this wrong
+    // is a half-voxel bias, 2 cm here, which shifts every colour toward one corner
+    // of the room.
+    Vec3 ChunkManager::InterpolateColor(const Vec3& colorPos, float* weightOut)
     {
-        const float& x = colorPos(0);
-        const float& y = colorPos(1);
-        const float& z = colorPos(2);
-        const int x_0 = static_cast<int>(std::floor(x / voxelResolutionMeters));
-        const int y_0 = static_cast<int>(std::floor(y / voxelResolutionMeters));
-        const int z_0 = static_cast<int>(std::floor(z / voxelResolutionMeters));
+        // Continuous coordinates on the centroid grid: integer values land
+        // exactly on voxel centres.
+        const float gx = colorPos(0) / voxelResolutionMeters - 0.5f;
+        const float gy = colorPos(1) / voxelResolutionMeters - 0.5f;
+        const float gz = colorPos(2) / voxelResolutionMeters - 0.5f;
+
+        const int x_0 = static_cast<int>(std::floor(gx));
+        const int y_0 = static_cast<int>(std::floor(gy));
+        const int z_0 = static_cast<int>(std::floor(gz));
         const int x_1 = x_0 + 1;
         const int y_1 = y_0 + 1;
         const int z_1 = z_0 + 1;
 
+        // Back to metres, at the centroid of each of the eight surrounding
+        // voxels, which is what GetColorVoxel actually wants.
+        const auto centre = [this](int i, int j, int k) {
+            return Vec3((static_cast<float>(i) + 0.5f) * voxelResolutionMeters,
+                        (static_cast<float>(j) + 0.5f) * voxelResolutionMeters,
+                        (static_cast<float>(k) + 0.5f) * voxelResolutionMeters);
+        };
 
-        const ColorVoxel* v_000 = GetColorVoxel(Vec3(x_0, y_0, z_0));
-        const ColorVoxel* v_001 = GetColorVoxel(Vec3(x_0, y_0, z_1));
-        const ColorVoxel* v_011 = GetColorVoxel(Vec3(x_0, y_1, z_1));
-        const ColorVoxel* v_111 = GetColorVoxel(Vec3(x_1, y_1, z_1));
-        const ColorVoxel* v_110 = GetColorVoxel(Vec3(x_1, y_1, z_0));
-        const ColorVoxel* v_100 = GetColorVoxel(Vec3(x_1, y_0, z_0));
-        const ColorVoxel* v_010 = GetColorVoxel(Vec3(x_0, y_1, z_0));
-        const ColorVoxel* v_101 = GetColorVoxel(Vec3(x_1, y_0, z_1));
+        const ColorVoxel* v_000 = GetColorVoxel(centre(x_0, y_0, z_0));
+        const ColorVoxel* v_001 = GetColorVoxel(centre(x_0, y_0, z_1));
+        const ColorVoxel* v_011 = GetColorVoxel(centre(x_0, y_1, z_1));
+        const ColorVoxel* v_111 = GetColorVoxel(centre(x_1, y_1, z_1));
+        const ColorVoxel* v_110 = GetColorVoxel(centre(x_1, y_1, z_0));
+        const ColorVoxel* v_100 = GetColorVoxel(centre(x_1, y_0, z_0));
+        const ColorVoxel* v_010 = GetColorVoxel(centre(x_0, y_1, z_0));
+        const ColorVoxel* v_101 = GetColorVoxel(centre(x_1, y_0, z_1));
+
+        // Weights normalise against the ceiling the integrator was given, so a
+        // voxel at its ceiling reads exactly 1.0. Falling back to 255 keeps this
+        // meaningful when no ceiling was set, which is upstream's unbounded mean.
+        const float weightScale =
+                1.0f / static_cast<float>(colorMaxWeight > 0 ? colorMaxWeight : 255);
 
         if(!v_000 || !v_001 || !v_011 || !v_111 || !v_110 || !v_100 || !v_010 || !v_101)
         {
-            const ChunkID& chunkID = GetIDAt(colorPos);
-
-            if(!HasChunk(chunkID))
+            // At least one neighbour is outside any allocated chunk, which is the
+            // ordinary case for a vertex on the outer face of the reconstruction.
+            // Nearest neighbour at the position asked for, which needs only the
+            // one chunk that vertex sits in.
+            const ColorVoxel* nearest = GetColorVoxel(colorPos);
+            if (nearest == nullptr)
             {
+                if (weightOut) *weightOut = 0.0f;
                 return Vec3(0, 0, 0);
             }
-            else
+            if (weightOut) *weightOut = static_cast<float>(nearest->GetWeight()) * weightScale;
+            return Vec3(static_cast<float>(nearest->GetRed()) / 255.0f,
+                        static_cast<float>(nearest->GetGreen()) / 255.0f,
+                        static_cast<float>(nearest->GetBlue()) / 255.0f);
+        }
+
+        const float xd = gx - static_cast<float>(x_0);
+        const float yd = gy - static_cast<float>(y_0);
+        const float zd = gz - static_cast<float>(z_0);
+
+        const ColorVoxel* corners[8] = {v_000, v_100, v_010, v_110, v_001, v_101, v_011, v_111};
+        const float coefficients[8] = {
+                (1 - xd) * (1 - yd) * (1 - zd), xd * (1 - yd) * (1 - zd),
+                (1 - xd) * yd * (1 - zd),       xd * yd * (1 - zd),
+                (1 - xd) * (1 - yd) * zd,       xd * (1 - yd) * zd,
+                (1 - xd) * yd * zd,             xd * yd * zd,
+        };
+
+        // LOCAL MODIFICATION: weighted by each corner's own colour weight, not a
+        // plain blend of the eight RGB triples.
+        //
+        // The plain blend has a specific failure and it is not subtle. A voxel
+        // that has never been seen in colour holds (0, 0, 0), which is
+        // indistinguishable from black, so blending it in drags the result toward
+        // black in proportion to how close the vertex is to it. That happens
+        // wherever colour coverage is patchy against geometry coverage -- around
+        // any voxel integrated on a frame whose camera image had not arrived yet,
+        // and along the whole leading edge of a sweep -- and it reads as dark
+        // fringing that looks like bad lighting or bad normals.
+        //
+        // Weighting by the colour weight makes an unobserved corner contribute
+        // NOTHING rather than contributing black, which is what "no evidence"
+        // means. The denominator is the trilinear interpolation of the weights
+        // themselves, because the coefficients sum to one, so it doubles as the
+        // confidence this function reports.
+        float totalWeight = 0.0f;
+        float red = 0.0f;
+        float green = 0.0f;
+        float blue = 0.0f;
+        for (int corner = 0; corner < 8; corner++)
+        {
+            const float weight =
+                    coefficients[corner] * static_cast<float>(corners[corner]->GetWeight());
+            if (weight <= 0.0f)
             {
-                const ChunkPtr& chunk = GetChunk(chunkID);
-                return chunk->GetColorAt(colorPos);
+                continue;
             }
+            totalWeight += weight;
+            red += weight * static_cast<float>(corners[corner]->GetRed());
+            green += weight * static_cast<float>(corners[corner]->GetGreen());
+            blue += weight * static_cast<float>(corners[corner]->GetBlue());
         }
 
-        float xd = (x - x_0) / (x_1 - x_0);
-        float yd = (y - y_0) / (y_1 - y_0);
-        float zd = (z - z_0) / (z_1 - z_0);
-        float red, green, blue = 0.0f;
+        // Every corner exists as geometry but none has been seen in colour. The
+        // renderer reads the zero weight and draws its flat colour.
+        if (totalWeight <= 0.0f)
         {
-            float c_00 = v_000->GetRed() * (1 - xd) + v_100->GetRed() * xd;
-            float c_10 = v_010->GetRed() * (1 - xd) + v_110->GetRed() * xd;
-            float c_01 = v_001->GetRed() * (1 - xd) + v_101->GetRed() * xd;
-            float c_11 = v_011->GetRed() * (1 - xd) + v_111->GetRed() * xd;
-            float c_0 = c_00 * (1 - yd) + c_10 * yd;
-            float c_1 = c_01 * (1 - yd) + c_11 * yd;
-            float c = c_0 * (1 - zd) + c_1 * zd;
-            red = c / 255.0f;
+            if (weightOut) *weightOut = 0.0f;
+            return Vec3(0, 0, 0);
         }
-        {
-            float c_00 = v_000->GetGreen() * (1 - xd) + v_100->GetGreen() * xd;
-            float c_10 = v_010->GetGreen() * (1 - xd) + v_110->GetGreen() * xd;
-            float c_01 = v_001->GetGreen() * (1 - xd) + v_101->GetGreen() * xd;
-            float c_11 = v_011->GetGreen() * (1 - xd) + v_111->GetGreen() * xd;
-            float c_0 = c_00 * (1 - yd) + c_10 * yd;
-            float c_1 = c_01 * (1 - yd) + c_11 * yd;
-            float c = c_0 * (1 - zd) + c_1 * zd;
-            green = c / 255.0f;
-        }
-        {
-            float c_00 = v_000->GetBlue() * (1 - xd) + v_100->GetBlue()  * xd;
-            float c_10 = v_010->GetBlue() * (1 - xd) + v_110->GetBlue()  * xd;
-            float c_01 = v_001->GetBlue() * (1 - xd) + v_101->GetBlue()  * xd;
-            float c_11 = v_011->GetBlue() * (1 - xd) + v_111->GetBlue()  * xd;
-            float c_0 = c_00 * (1 - yd) + c_10 * yd;
-            float c_1 = c_01 * (1 - yd) + c_11 * yd;
-            float c = c_0 * (1 - zd) + c_1 * zd;
-            blue = c / 255.0f;
-         }
 
-        return Vec3(red, green, blue);
+        // Reported before the division below, so it stays an interpolated colour
+        // weight rather than a normalisation factor. A fade here is what makes
+        // the boundary of a coloured region a gradient in the shader instead of
+        // a hard edge.
+        if (weightOut) *weightOut = totalWeight * weightScale;
+
+        const float normalise = 1.0f / (totalWeight * 255.0f);
+        return Vec3(red * normalise, green * normalise, blue * normalise);
     }
 
     const DistVoxel* ChunkManager::GetDistanceVoxel(const Vec3& pos)
@@ -629,10 +699,14 @@ namespace chisel
 
         mesh->colors.clear();
         mesh->colors.resize(mesh->vertices.size());
+        // LOCAL MODIFICATION: the confidence lane, filled in step with the colour
+        // so the two can never be different lengths. See Mesh::colorWeights.
+        mesh->colorWeights.clear();
+        mesh->colorWeights.resize(mesh->vertices.size());
         for (size_t i = 0; i < mesh->vertices.size(); i++)
         {
             const Vec3& vertex = mesh->vertices.at(i);
-            mesh->colors[i] = InterpolateColor(vertex);
+            mesh->colors[i] = InterpolateColor(vertex, &mesh->colorWeights[i]);
         }
     }
 

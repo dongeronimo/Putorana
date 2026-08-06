@@ -87,6 +87,16 @@ const char* FormatName(VkFormat format) {
 
 } // namespace
 
+bool IsSrgbFormat(VkFormat format) {
+    switch (format) {
+        case VK_FORMAT_R8G8B8A8_SRGB:
+        case VK_FORMAT_B8G8R8A8_SRGB:
+            return true;
+        default:
+            return false;
+    }
+}
+
 std::unique_ptr<Swapchain> Swapchain::Create(VkPhysicalDevice physicalDevice, VkDevice device,
                                              VkSurfaceKHR surface, VkSwapchainKHR oldSwapchain,
                                              std::string& error) {

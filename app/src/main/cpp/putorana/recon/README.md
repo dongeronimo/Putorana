@@ -87,8 +87,9 @@ a room fell from 17 MiB across 263 nodes to 4 MiB across 64.
 `ProjectionIntegrator.h`.
 
 `ProjectionIntegrator::Integrate` passed a hardcoded `1.0f` as the weight. The
-`weighter` member is consulted only from `IntegrateColor`, which this app never
-calls, so a configured `Weighter` did nothing at all in the live path.
+`weighter` member is consulted only from `IntegrateColor`, which this app does
+not call even now that it reconstructs in colour (see *"Colour"* below), so a
+configured `Weighter` did nothing at all in the live path.
 
 Calling the weighter would fix the lie but not the need. ARCore ships a
 confidence map alongside raw depth, and its samples are not of equal quality. The
@@ -878,7 +879,7 @@ preference. See *"The boundary, and why it is also a build setting"* above.
 |---|---|
 | `ChunkKey` | three `int32_t`. `Eigen::Vector3i` on the other side. |
 | `ChunkUpdate` | key, world-space origin, vertex count, index count. Deliberately carries no geometry. |
-| `Vertex` | 24 bytes, position and normal, `static_assert`ed. Laid out to match `graphics::PositionNormalVertex` exactly. |
+| `Vertex` | 28 bytes: position, normal, and RGB plus a colour-confidence byte. Laid out to match `graphics::ReconstructedVertex` exactly, and `static_assert`ed against it in `OpenChiselWorld.cpp`. |
 | `Config` | everything that has to be decided before the first frame. |
 
 `ChunkUpdate` is cheap on purpose. The caller reads it, sizes and maps a buffer,
@@ -998,6 +999,59 @@ Rare before the confidence gate existed, because a frame with no readings at all
 is rare. Not rare after it: a dark room, a phone still on a desk, or the first
 seconds after a resume all produce frames where everything is below threshold.
 
+## Colour
+
+Voxels carry the colour the camera saw at them, and mesh vertices carry an
+interpolation of it. This is *not* OpenChisel's colour path, and the distinction
+is the whole design.
+
+**`IntegrateColor` is not called and should not be.** It is a parallel copy of
+`Integrate` that received none of the six corrections in
+`third_party/open_chisel/README.md`: it still pads the truncation band by two
+voxel diagonals, still ignores the per-pixel confidence weights, still has no
+weight ceiling, and still carries the carve eligibility test that cannot remove a
+surface. Calling it would not add colour to this reconstruction, it would replace
+this reconstruction with a worse one that has colour. Colour is instead fused
+inside `Integrate`, in the branch that already decided the voxel is in the band.
+
+**There is no second camera, and no second projection.** Upstream's model is a rig
+where colour and depth are different sensors with different extrinsics. On a
+phone they are the same sensor: the depth map is a centre crop of the camera
+image followed by a uniform resample, so the two share a pose exactly and differ
+only in intrinsics. Two pinholes at one pose relate by an affine map on pixels,
+because the `(X/Z, Y/Z)` they both project cancels:
+
+    u_colour = a · u_depth + b,    a = fx_c / fx_d,    b = cx_c − a · cx_d
+
+So a colour sample costs one multiply and one add per axis on a projection the
+depth path has already done. `RECONPROBE colour mapping` prints `a` on the first
+frame that has an image, and **the two axes' scales must be equal** — that is
+what a centred crop means, and if they differ the model is wrong and colour will
+slide off the geometry toward the edges of frame.
+
+**Colour is a running average with a ceiling**, exactly like distance.
+Upstream froze a voxel's colour after five observations, which on a phone is five
+consecutive frames of one sweep with auto-exposure still settling. The ceiling
+here is 32, so one observation is always worth 1/33 and a surface that is re-lit
+or better exposed catches up.
+
+**A carved voxel loses its colour.** `DistVoxel::Carve` resets the distance voxel
+and knows nothing about the `ColorVoxel` sharing its index; without an explicit
+reset the colour of whatever used to be there survives its own geometry.
+
+**`InterpolateColor` was dimensionally broken upstream** and could not have
+produced a correct colour: it computed voxel indices and passed them to a
+function taking metres, so at 4 cm voxels every lookup landed 25 times too far
+from the origin and the trilinear path was dead code behind a fallback. It is
+fixed here, on the centroid grid rather than the cell grid, and weighted by each
+corner's own colour weight — an unobserved corner holds `(0, 0, 0)`, and blending
+that in as if it were black is what produces dark fringing along the leading edge
+of a sweep.
+
+The per-vertex confidence that comes out of it is what lets the renderer tell a
+black surface from a voxel nobody has seen in colour. See `ReconstructedVertex`
+in `graphics/Mesh.h` for what happens to it after that.
+
 ## Reading the instruments
 
 Everything this namespace logs is tagged `RECONPROBE`, and that token appears
@@ -1018,6 +1072,9 @@ and having the device decide removes the step where the numbers get read wrong.
 | `confidence of the samples that DID exist` | the bimodal distribution above. Decides whether any threshold is meaningful. |
 | `chunk vertex counts ... in buckets of 512` | settles the mesh capacity in `worlds::openChisel::OpenChiselWorld`, which is fixed at creation. |
 | `dedup ratio` | 1.00 means the edge keys are not matching and vertex sharing is silently not happening, which looks identical on screen. |
+| `colour mapping` | the depth-to-colour affine map, once. **Its two scales must be equal**; unequal means the depth map is not a centred crop of the camera image and colour will slide toward the edges of frame. |
+| `colour over the window` | voxels that took a colour sample, and frames that integrated with no camera image at all. Zero voxels with zero such frames means `colorMinWeight` is rejecting everything; zero with the frame count climbing means the image is never arriving. |
+| `remesh N ms mean per chunk` | marching cubes plus `ColorizeMesh` plus `ComputeNormalsFromGradients`. Colour added eight per-vertex chunk lookups to a pass that already did six, so this is the number that says whether that mattered. `kRemeshBudgetPerFrame` is the lever if it did. |
 
 ---
 

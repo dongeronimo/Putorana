@@ -14,16 +14,17 @@ namespace putorana::graphics {
 class Device;
 
 /**
- * The reconstruction's material: one colour, one hardcoded light direction,
- * drawn from VertexFormat::PositionNormal geometry.
+ * The reconstruction's material: the camera colour each vertex carries, over a
+ * flat lit colour wherever there is no camera colour yet. Drawn from
+ * VertexFormat::Reconstructed geometry.
  *
  * ## Why this is a copy of FlatColorMaterial rather than a reuse of it
  *
  * Two reasons, and neither is avoidable by being cleverer with this class.
  *
  * The shader cannot be shared. mesh_flat.vert declares `layout(location = 2) in
- * vec2 inUv`, and a pipeline built for PositionNormal supplies only locations 0
- * and 1 — the shader would read an attribute the pipeline never binds. So chunk
+ * vec2 inUv`, and a pipeline built for Reconstructed supplies locations 0, 1 and
+ * 5 — the shader would read an attribute the pipeline never binds. So chunk
  * geometry needs mesh_chunk.vert, and a different shader means a different
  * material.
  *
@@ -50,7 +51,44 @@ public:
 
     ~ChunkMaterial() override;
 
+    /**
+     * The colour drawn where the reconstruction has geometry but no camera
+     * colour to put on it. Lit by the hardcoded directional light.
+     * */
     void SetColor(const glm::vec4& color);
+
+    /**
+     * How far to trust the per-vertex camera colour, 0 to 1.
+     *
+     * Multiplied by each vertex's own confidence byte, so 1 means "use the
+     * camera colour wherever there is one" and 0 means "ignore it everywhere".
+     *
+     * Zero is the debugging setting, and it is worth knowing it exists before
+     * the first time the reconstruction looks wrong. Camera colour is drawn
+     * essentially unlit, because it already contains the room's real lighting,
+     * and unlit colour hides exactly the faults a single directional light was
+     * chosen to expose: a surface that is noisy, inside out, or facing the wrong
+     * way. Setting this to 0 puts that light back and answers whether the
+     * problem is the geometry or the colour on it.
+     * */
+    void SetColorMix(float mix);
+
+    /**
+     * Whether the attachment this material draws into is an _SRGB format, which
+     * decides whether the shader hands over linear or gamma-encoded values.
+     *
+     * Not a property of the material and it should not have to be here. It is,
+     * because the per-vertex colour came off a camera in gamma-encoded sRGB and
+     * has to end up in whatever encoding the attachment expects, and a material
+     * has no way to ask the pass what that is: the format arrives in
+     * CreatePipeline, long after the uniform buffer was written.
+     *
+     * Whoever creates the pass tells the material, with IsSrgbFormat from
+     * Swapchain.h. Getting it wrong puts the reconstruction at a visibly
+     * different brightness from the camera feed immediately behind it, which is
+     * the one comparison this app makes on every frame.
+     * */
+    void SetSrgbTarget(bool srgb);
 
     MaterialPipeline CreatePipeline(const PipelineContext& context,
                                     VertexFormat format) const override;
@@ -60,7 +98,14 @@ public:
 private:
     ChunkMaterial() = default;
 
+    /** Pushes both parameters below into the uniform buffer. */
+    void Write();
+
     VkDevice handle_ = VK_NULL_HANDLE;
+
+    glm::vec4 color_{1.0f};
+    float colorMix_ = 1.0f;
+    bool srgbTarget_ = true;
 
     /**
      * Set 2's layout, owned per INSTANCE. See the note in FlatColorMaterial.h:

@@ -40,18 +40,38 @@ struct ChunkKey {
 };
 
 /**
- * 24 bytes, laid out to match graphics::PositionNormalVertex exactly so the
+ * 28 bytes, laid out to match graphics::ReconstructedVertex exactly so the
  * interleave below writes straight into a mapped vertex buffer.
  *
  * Declared here rather than reusing the graphics type because graphics/Mesh.h
  * includes volk.h, and this namespace inherits putorana::ar's rule that it may
- * not. The two are kept honest by a static_assert at the seam.
+ * not. The two are kept honest by static_asserts at the seam, in
+ * OpenChiselWorld.cpp, which is the one translation unit that sees both.
+ *
+ * ## Colour is four bytes, not three floats
+ *
+ * RGB as float3 would put this at 36 bytes and buy nothing: the source is an
+ * 8-bit camera and the destination is an 8-bit swapchain, so the extra 24 bits
+ * per channel would carry no information at any point in the chain.
+ *
+ * The fourth byte is not padding. It is how much colour evidence stands behind
+ * the first three, 0 to 255, and it exists because (0, 0, 0) is ambiguous
+ * between "black surface" and "never seen in colour". The shader uses it to fall
+ * back to the material's flat colour where the reconstruction has geometry but
+ * no colour yet, which also makes a build with colour disabled draw exactly what
+ * this app drew before colour existed, with no branch anywhere in C++.
+ *
+ * RGB is stored GAMMA ENCODED, which is what an 8-bit channel should hold. The
+ * fragment shader linearises. See ColorVoxel::Integrate and mesh_chunk.frag.
  * */
 struct Vertex {
     glm::vec3 position;
     glm::vec3 normal;
+    uint8_t color[4];
 };
-static_assert(sizeof(Vertex) == 24, "recon::Vertex must stay tightly packed at 24 bytes");
+static_assert(sizeof(Vertex) == 28, "recon::Vertex must stay tightly packed at 28 bytes");
+static_assert(alignof(Vertex) == 4,
+              "recon::Vertex must not pick up wider alignment — the stride assumes 4");
 
 /**
  * What changed about one chunk, without the geometry.
@@ -231,6 +251,61 @@ struct Config {
      * */
     float nearPlane = 0.3f;
     float farPlane = 3.0f;
+
+    /**
+     * Whether voxels carry the colour the camera saw at them.
+     *
+     * Costs 4 bytes per voxel on top of DistVoxel's 8, so the TSDF, which is by
+     * far the largest structure in the app, grows by half: a 16^3 chunk goes
+     * from 32 KiB to 48 KiB. That is the number to watch, not the vertex buffer,
+     * where colour adds 4 bytes to 24.
+     *
+     * FIXED AT CREATION and it cannot become a runtime toggle without more work
+     * than it looks. Chunk allocates its colour array in its constructor, so
+     * chunks built while this was false have an empty one, and
+     * GetColorVoxelMutable indexes it with std::vector::at. Flipping this on a
+     * live reconstruction would throw on the first chunk that predates the flip.
+     * */
+    bool colorEnabled = true;
+
+    /**
+     * The confidence weight a depth sample needs before its COLOUR is fused,
+     * on the same [confidenceWeightFloor, 1] scale the geometry uses.
+     *
+     * 0 by default, which means colour follows geometry exactly: a sample good
+     * enough to move the surface is good enough to paint it. That is deliberate
+     * rather than lazy. The hard rejection has already happened by this point --
+     * confidenceThreshold dropped the worst samples before Chisel ever saw the
+     * frame -- so a second gate here would only remove colour from the surfaces
+     * that are hardest to see, which are exactly the ones a flat shade least
+     * describes.
+     *
+     * It exists because the two questions are not identical. A weak stereo match
+     * puts the surface roughly right and can take its colour from whatever the
+     * search happened to land on, so if colour comes out noisier than the
+     * geometry does, this is the lever.
+     * */
+    float colorMinWeight = 0.0f;
+
+    /**
+     * Ceiling on a voxel's accumulated colour weight, 0 to 255.
+     *
+     * Upstream's colour path effectively used 5, by refusing to integrate at all
+     * once the weight reached it. Five observations is five consecutive frames of
+     * one sweep, so the colour of every voxel was decided while ARCore's
+     * auto-exposure and white balance were still settling, from whichever angle
+     * happened to see it first, and no amount of later looking could correct it.
+     *
+     * 32 is the same reasoning as maxWeight above, one order of magnitude down
+     * because colour converges far faster than geometry: one observation is worth
+     * 1/33 of the result, so about a second of looking replaces the estimate
+     * entirely, and a surface re-lit or re-exposed catches up rather than staying
+     * wrong forever.
+     *
+     * This is also what InterpolateColor normalises the per-vertex confidence
+     * against, so a voxel at the ceiling reads exactly 1.0 in the shader.
+     * */
+    uint8_t colorMaxWeight = 32;
 };
 
 class Reconstruction {
@@ -242,16 +317,33 @@ public:
     Reconstruction& operator=(const Reconstruction&) = delete;
 
     /**
-     * Fuse one depth frame. `pose` must be the SENSOR pose, for the same reason
-     * Unproject requires it: it is the one whose axes agree with the unrotated
-     * intrinsics the depth map carries. Does nothing if the frame has no depth.
+     * Fuse one frame: its depth, and the colour of the surfaces that depth found.
+     * Does nothing if the frame has no depth.
+     *
+     * ## Why this takes the whole frame
+     *
+     * It used to take (depth, pose), with a comment insisting the pose be the
+     * SENSOR one rather than the display one, because that is the pose whose axes
+     * agree with the unrotated intrinsics the depth map carries. Getting it wrong
+     * lays the reconstructed room on its side.
+     *
+     * Colour makes that instruction impossible to follow from outside. The colour
+     * image, the depth map and the pose have to be from ONE frame and one pose,
+     * and the depth-to-colour mapping is derived from the two sets of intrinsics
+     * on that same frame. Handing all of it over as four or five arguments is an
+     * invitation to pass this frame's depth with last frame's image, which does
+     * not fail, it just smears colour across the geometry by however far the
+     * phone moved.
+     *
+     * So the choice of pose moves inside, where it is made once, next to the
+     * comment in ToExtrinsic that explains it.
      *
      * Cheaper than Remesh, and it does not have to run at the same rate --
      * depth is highly redundant frame to frame, so integrating at 5-10 Hz costs
      * almost nothing in quality and is the first lever to pull if this ever
      * shows up in a profile.
      * */
-    void Integrate(const ar::DepthImage& depth, const ar::CameraPose& pose);
+    void Integrate(const ar::CameraFrame& frame);
 
     /**
      * Re-run marching cubes on at most `maxChunks` dirty chunks. Returns how

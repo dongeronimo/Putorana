@@ -1,18 +1,19 @@
 #version 450
 
-// The reconstruction's vertex shader. Identical to mesh_flat.vert except that it
-// reads VertexFormat::PositionNormal -- 24 bytes, no UV.
+// The reconstruction's vertex shader. Like mesh_flat.vert except that it reads
+// VertexFormat::Reconstructed -- 28 bytes, no UV, and a packed colour.
 //
 // Why a second shader rather than reusing mesh_flat: vertex input layout is baked
 // into a pipeline, so a format without location 2 needs its own. Reusing
-// mesh_flat against a 24-byte vertex would have the pipeline fetch 8 bytes past
-// the end of the last vertex in the buffer.
+// mesh_flat against this vertex would have the pipeline fetch 8 bytes past the
+// end of the last vertex in the buffer.
 //
 // The duplication against mesh_flat.vert is deliberate and known. Chunk meshes
 // are generated geometry with no texture, so a UV lane would be 8 bytes of
 // zeroes per vertex that nothing reads -- on the order of 8 MB for a room at 4cm
-// voxels, plus its share of every byte re-uploaded on every remesh. See the
-// comment on VertexFormat::PositionNormal in Mesh.h.
+// voxels, plus its share of every byte re-uploaded on every remesh. What they
+// have instead is the colour the camera saw at each voxel, which is 4 bytes and
+// has nowhere else to live. See VertexFormat::Reconstructed in Mesh.h.
 //
 // The set layout is the contract in Material.h and is the same for every shader
 // that draws geometry:
@@ -23,6 +24,16 @@
 
 layout(location = 0) in vec3 inPosition;
 layout(location = 1) in vec3 inNormal;
+
+// Location 5, not 2, and the gap is on purpose: location 2 is a UV in every
+// other shader in this project, and keeping that true everywhere means a colour
+// can never be read as one. R8G8B8A8_UNORM on the C++ side, so this arrives in
+// [0, 1] with the gamma encoding the camera produced still on it.
+//
+// .a is NOT opacity. It is how much colour evidence stands behind .rgb, which is
+// the only way to tell a black surface from a voxel nobody has seen in colour
+// yet. See ReconstructedVertex in Mesh.h.
+layout(location = 5) in vec4 inColor;
 
 // std140 to match the C++ FrameData: a uniform block's default packing is not
 // specified for Vulkan, so saying which one is not optional.
@@ -46,6 +57,7 @@ layout(set = 1, binding = 0, std430) readonly buffer Objects {
 };
 
 layout(location = 0) out vec3 outNormal;
+layout(location = 1) out vec4 outColor;
 
 void main() {
     // gl_InstanceIndex is firstInstance plus the instance counter, and the pass
@@ -64,4 +76,14 @@ void main() {
     // The inverse transpose, not the model matrix: under non-uniform scale the
     // model matrix skews a normal off the surface it belongs to.
     outNormal = mat3(object.normalMatrix) * inNormal;
+
+    // Straight through, still gamma encoded. Interpolating gamma-encoded values
+    // across a triangle is not strictly right, but it is what interpolating
+    // vertex colours means everywhere, and the alternative -- linearising here --
+    // would spend three pow() per vertex to change the shading of a 4cm gradient
+    // by less than a quantisation step.
+    //
+    // The confidence in .a interpolates too, which is what makes the boundary of
+    // a coloured region a fade rather than a hard edge.
+    outColor = inColor;
 }

@@ -4,6 +4,7 @@
 #include <open_chisel/ProjectionIntegrator.h>
 #include <open_chisel/camera/DepthImage.h>
 #include <open_chisel/camera/PinholeCamera.h>
+#include <open_chisel/camera/YuvColorImage.h>
 
 #include <android/log.h>
 
@@ -28,6 +29,11 @@ chisel::ChunkID ToChunkId(const ChunkKey& key) {
 
 ChunkKey ToChunkKey(const chisel::ChunkID& id) {
     return ChunkKey{id.x(), id.y(), id.z()};
+}
+
+/** A [0, 1] float to a colour byte, rounded and clamped. */
+uint8_t ToByte(float value) {
+    return static_cast<uint8_t>(std::clamp(value, 0.0f, 1.0f) * 255.0f + 0.5f);
 }
 
 /**
@@ -56,6 +62,60 @@ chisel::Transform ToExtrinsic(const ar::CameraPose& pose) {
     transform.translation() =
             Eigen::Vector3f(pose.translation[0], pose.translation[1], pose.translation[2]);
     return transform;
+}
+
+/**
+ * This frame's camera image, plus the map from a depth pixel to a pixel of it.
+ *
+ * Returns a default-constructed (invalid) image when there is nothing usable, and
+ * the integrator then fuses geometry without colour.
+ *
+ * ## The map, and why there is no second camera
+ *
+ * OpenChisel's colour path assumes a rig: a separate colour camera with its own
+ * extrinsic, projected against separately per voxel. A phone is not that. The
+ * depth map is a centre crop of THIS camera image followed by a uniform resample
+ * (see ar::Subsystem::ReadDepthImage, which derives the crop from the two aspect
+ * ratios), so the two share a pose exactly and differ only in intrinsics.
+ *
+ * Two pinholes at the same pose relate by an affine map on pixels, because the
+ * (X/Z, Y/Z) they both project cancels between them:
+ *
+ *     u_colour = a * u_depth + b,   a = fx_c / fx_d,   b = cx_c - a * cx_d
+ *
+ * That is two multiplies and two adds per voxel, applied to a projection the
+ * depth path has already paid for. The alternative is a second 3x3 transform and
+ * a second projection per voxel, for the same answer.
+ * */
+chisel::YuvColorImage BuildColorImage(const ar::CameraFrame& frame) {
+    chisel::YuvColorImage image;
+
+    const ar::CameraImage& source = frame.image;
+    const ar::Intrinsics& colorK = frame.imageIntrinsics;
+    const ar::Intrinsics& depthK = frame.depth.intrinsics;
+    if (source.y == nullptr || source.uv == nullptr || source.width <= 0 || source.height <= 0 ||
+        source.yRowStride <= 0 || source.uvRowStride <= 0) {
+        return image;
+    }
+    // Both denominators. A zero here would produce infinities that silently
+    // clamp to the image edge, painting every voxel with one corner pixel.
+    if (depthK.fx <= 0.0f || depthK.fy <= 0.0f || colorK.fx <= 0.0f || colorK.fy <= 0.0f) {
+        return image;
+    }
+
+    image.luma = source.y;
+    image.lumaRowStride = source.yRowStride;
+    image.chroma = source.uv;
+    image.chromaRowStride = source.uvRowStride;
+    image.vFirst = source.vFirst;
+    image.width = source.width;
+    image.height = source.height;
+
+    image.scaleX = colorK.fx / depthK.fx;
+    image.offsetX = colorK.cx - image.scaleX * depthK.cx;
+    image.scaleY = colorK.fy / depthK.fy;
+    image.offsetY = colorK.cy - image.scaleY * depthK.cy;
+    return image;
 }
 
 } // namespace
@@ -135,6 +195,24 @@ struct Reconstruction::Impl {
     uint64_t clearedVoxels = 0;
     uint64_t nearFrontVoxels = 0;
 
+    /** Voxels that received a colour sample, over the same window. */
+    uint64_t coloredVoxels = 0;
+
+    /** So the depth-to-colour mapping is printed once, on the first frame that
+     *  actually has an image to map onto. */
+    bool loggedColorMapping = false;
+
+    /**
+     * Frames integrated with geometry but no colour image. Cumulative.
+     *
+     * Normal in small numbers: the CPU image and the depth map are separate
+     * acquisitions that fail independently, and the first frames after a resume
+     * routinely have one without the other. A number that keeps climbing means
+     * the camera image is never arriving, and the reconstruction is being built
+     * colourless without anything else saying so.
+     * */
+    uint32_t framesWithoutColor = 0;
+
     /**
      * Where a frame's depth samples went, and how confident the ones that
      * existed were. Both accumulate over the timing window below.
@@ -174,6 +252,26 @@ struct Reconstruction::Impl {
     uint64_t integrateNanosTotal = 0;
     uint32_t integrationsInWindow = 0;
 
+    /**
+     * Marching cubes cost, per chunk, over a window of chunks rather than frames.
+     *
+     * Separate from the integration timer above because the two are budgeted
+     * separately and move for different reasons: integration tracks the VOLUME of
+     * the frustum, meshing tracks how many chunks were dirtied.
+     *
+     * It exists because colour made this the expensive half. RecomputeMesh now
+     * runs ColorizeMesh as well as ComputeNormalsFromGradients, and both walk
+     * every vertex doing chunk-hash lookups that each copy a shared_ptr and touch
+     * an atomic refcount -- eight per vertex for colour on top of the six the
+     * normals already did. The prediction is that this stays the same order as
+     * before, which is a prediction and not a measurement, and the number that
+     * settles it is this one. If it grew, kRemeshBudgetPerFrame in
+     * worlds::openChisel is the immediate lever.
+     * */
+    static constexpr uint32_t kMeshTimingWindow = 200;
+    uint64_t meshNanosTotal = 0;
+    uint32_t meshesInWindow = 0;
+
     /** Chunk origin from its key alone: numVoxels * ID * resolution, which is
      *  what Chunk's constructor computes. Deterministic, so it needs no lookup
      *  and works for a chunk that has already been collected. */
@@ -198,10 +296,15 @@ std::unique_ptr<Reconstruction> Reconstruction::Create(const Config& config, std
     impl.config = config;
 
     const Eigen::Vector3i chunkSize(config.chunkVoxels, config.chunkVoxels, config.chunkVoxels);
-    // useColor = false. Colour would double the per-voxel cost -- a ColorVoxel is
-    // as wide as a DistVoxel even after the fork trimmed both -- and nothing
-    // draws the reconstruction in colour. See third_party/open_chisel/README.md.
-    impl.chisel = std::make_unique<chisel::Chisel>(chunkSize, config.voxelMetres, false);
+    // Colour costs 4 bytes per voxel on top of DistVoxel's 8, so the TSDF grows
+    // by half. Fixed here and not changeable afterwards: Chunk allocates its
+    // colour array in its constructor, so a chunk created while this was false
+    // has an empty one and GetColorVoxelMutable would throw on it.
+    //
+    // Setting it also makes ChunkManager::RecomputeMesh call ColorizeMesh, which
+    // is what puts a colour on every mesh vertex.
+    impl.chisel = std::make_unique<chisel::Chisel>(chunkSize, config.voxelMetres,
+                                                   config.colorEnabled);
 
     // Centroids are the per-voxel offsets within a chunk, precomputed once by
     // ChunkManager. The integrator walks them for every chunk in the frustum, so
@@ -216,6 +319,13 @@ std::unique_ptr<Reconstruction> Reconstruction::Create(const Config& config, std
     impl.integrator.SetCarvingEnabled(config.carvingEnabled);
     impl.integrator.SetCarvingDecay(config.carvingDecay, config.carvingMinWeight);
     impl.integrator.SetMaxWeight(config.maxWeight);
+    impl.integrator.SetColorMinWeight(config.colorMinWeight);
+    impl.integrator.SetColorMaxWeight(config.colorMaxWeight);
+    // The same ceiling on both sides, and it has to be: the integrator caps the
+    // weight it accumulates, and the mesher divides by it to normalise the
+    // per-vertex confidence. Two different numbers would put a surface at its
+    // ceiling somewhere other than 1.0 in the shader.
+    impl.chisel->GetMutableChunkManager().SetColorMaxWeight(config.colorMaxWeight);
 
     impl.camera.SetNearPlane(config.nearPlane);
     impl.camera.SetFarPlane(config.farPlane);
@@ -225,19 +335,41 @@ std::unique_ptr<Reconstruction> Reconstruction::Create(const Config& config, std
                         "(%.2f m chunks), truncation |%.3g d^2 + %.3g d + %.3g| * %.3g, "
                         "carving %s (decay %.2f per observation, floor %.2f), max weight %.0f, "
                         "depth [%.2f, %.2f] m, confidence gate %u/255 then weight "
-                        "%.2f..1.00 to the power %.1f",
+                        "%.2f..1.00 to the power %.1f, colour %s (min weight %.2f, "
+                        "max weight %u, so one observation is worth 1/%u)",
                         config.chunkVoxels, config.voxelMetres,
                         config.chunkVoxels * config.voxelMetres, config.truncationQuadratic,
                         config.truncationLinear, config.truncationConstant, config.truncationScale,
                         config.carvingEnabled ? "on" : "off", config.carvingDecay,
                         config.carvingMinWeight, config.maxWeight, config.nearPlane,
                         config.farPlane, static_cast<unsigned>(config.confidenceThreshold),
-                        config.confidenceWeightFloor, config.confidenceWeightExponent);
+                        config.confidenceWeightFloor, config.confidenceWeightExponent,
+                        config.colorEnabled ? "on" : "off", config.colorMinWeight,
+                        static_cast<unsigned>(config.colorMaxWeight),
+                        static_cast<unsigned>(config.colorMaxWeight) + 1u);
     return reconstruction;
 }
 
-void Reconstruction::Integrate(const ar::DepthImage& depth, const ar::CameraPose& pose) {
+void Reconstruction::Integrate(const ar::CameraFrame& frame) {
     Impl& impl = *impl_;
+    const ar::DepthImage& depth = frame.depth;
+    // The SENSOR pose, never the display one. See ToExtrinsic, and the note on
+    // CameraFrame::sensorPose: the two differ by a multiple of 90 degrees about
+    // the view axis, and the display one lays the reconstructed room on its side.
+    const ar::CameraPose& pose = frame.sensorPose;
+
+    // Dropped on ENTRY, before any of the early returns below, and this is the
+    // half of the colour lifetime that has to be unconditional.
+    //
+    // The image the integrator holds is a set of borrowed pointers into an
+    // ArImage the next Update releases. It is set again a few dozen lines down,
+    // just before the only call that reads it, so today no early return can
+    // expose a stale one. That is an argument about the current order of two
+    // statements, which is not the kind of thing to rest a dangling pointer on.
+    // Clearing here costs one struct assignment a frame and makes it true by
+    // construction instead.
+    impl.integrator.ClearColorImage();
+
     if (depth.millimetres == nullptr || depth.width <= 0 || depth.height <= 0) {
         return;
     }
@@ -430,6 +562,51 @@ void Reconstruction::Integrate(const ar::DepthImage& depth, const ar::CameraPose
     impl.camera.SetWidth(depth.width);
     impl.camera.SetHeight(depth.height);
 
+    // --- colour, for as long as this one call lasts ---
+    //
+    // Set per frame rather than held; already cleared on entry, above. A frame
+    // that has depth but no camera image gets a default-constructed one back
+    // from BuildColorImage and fuses geometry without colour, which is the
+    // ordinary state for the first frames after a resume.
+    const chisel::YuvColorImage colorImage =
+            impl.config.colorEnabled ? BuildColorImage(frame) : chisel::YuvColorImage();
+    impl.integrator.SetColorImage(colorImage);
+
+    if (impl.config.colorEnabled && !impl.loggedColorMapping && colorImage.IsValid()) {
+        impl.loggedColorMapping = true;
+        // The self-check for the whole colour path, and it is worth reading
+        // before anything else when the colour comes out misregistered.
+        //
+        // The two scales are the ratio of the two focal lengths, and the crop
+        // model in ar::Subsystem says they must be EQUAL, because a centred crop
+        // restores the aspect ratio before the resample. If they differ, the
+        // depth map is not a centred crop of this image and the affine map above
+        // is the wrong model -- which would show as colour sliding across the
+        // geometry toward the edges of the frame while looking right at the
+        // centre. The offsets are the crop, in colour pixels.
+        //
+        // The image dimensions are printed twice on purpose. The affine map is
+        // built from intrinsics that ARCore expresses against the CPU image, and
+        // sampled from an ArImage whose size is read separately; the two are
+        // meant to be the same picture. If they disagree the map is scaled wrong
+        // by exactly their ratio, and nothing else in the system would say so.
+        __android_log_print(ANDROID_LOG_INFO, kLogTag,
+                            "RECONPROBE colour mapping: depth %dx%d -> image %dx%d "
+                            "(intrinsics describe %dx%d, which must match), "
+                            "scale (%.3f, %.3f), offset (%.1f, %.1f), chroma %s. "
+                            "The two scales must be equal (a centred crop) and about %.2f; "
+                            "if they are not, the crop model is wrong and colour will slide "
+                            "toward the edges of frame.",
+                            depth.width, depth.height, colorImage.width, colorImage.height,
+                            frame.imageIntrinsics.width, frame.imageIntrinsics.height,
+                            colorImage.scaleX, colorImage.scaleY, colorImage.offsetX,
+                            colorImage.offsetY, colorImage.vFirst ? "NV21" : "NV12",
+                            static_cast<double>(colorImage.width) / std::max(depth.width, 1));
+    }
+    if (impl.config.colorEnabled && !colorImage.IsValid()) {
+        ++impl.framesWithoutColor;
+    }
+
     impl.integrator.ResetVoxelCounters();
     const auto integrateBegan = std::chrono::steady_clock::now();
     impl.chisel->IntegrateDepthScan<float>(impl.integrator, impl.depth, ToExtrinsic(pose),
@@ -438,6 +615,7 @@ void Reconstruction::Integrate(const ar::DepthImage& depth, const ar::CameraPose
     impl.carvedVoxels += impl.integrator.GetCarvedVoxels();
     impl.clearedVoxels += impl.integrator.GetClearedVoxels();
     impl.nearFrontVoxels += impl.integrator.GetNearFrontVoxels();
+    impl.coloredVoxels += impl.integrator.GetColoredVoxels();
 
     // --- the one number that says where the frame went ---
     //
@@ -518,11 +696,25 @@ void Reconstruction::Integrate(const ar::DepthImage& depth, const ar::CameraPose
                             impl.config.truncationConstant +
                                     2.0f * 1.7320508f * impl.config.voxelMetres);
 
+        if (impl.config.colorEnabled) {
+            // Colour is fused inside the same test that fuses distance, so this
+            // count and the integration band are the same population. It reads
+            // zero for exactly two reasons and they are worth telling apart: no
+            // colour image is arriving (framesWithoutColor climbs with it), or
+            // colorMinWeight is rejecting every sample (it does not).
+            __android_log_print(ANDROID_LOG_INFO, kLogTag,
+                                "RECONPROBE colour over the window: %llu voxels took a sample; "
+                                "%u frames integrated with no colour image at all",
+                                static_cast<unsigned long long>(impl.coloredVoxels),
+                                impl.framesWithoutColor);
+        }
+
         impl.integrateNanosTotal = 0;
         impl.integrationsInWindow = 0;
         impl.carvedVoxels = 0;
         impl.clearedVoxels = 0;
         impl.nearFrontVoxels = 0;
+        impl.coloredVoxels = 0;
         impl.noEstimateSamples = 0;
         impl.histogramSamples = 0;
         impl.windowSamples = 0;
@@ -606,7 +798,12 @@ uint32_t Reconstruction::Remesh(uint32_t maxChunks) {
         if (!chunks.HasChunk(id)) {
             continue;
         }
+        const auto meshBegan = std::chrono::steady_clock::now();
         chunks.RecomputeMesh(id, impl.meshMutex);
+        impl.meshNanosTotal += std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                       std::chrono::steady_clock::now() - meshBegan)
+                                       .count();
+        ++impl.meshesInWindow;
         ++done;
 
         uint32_t vertexCount = 0;
@@ -637,6 +834,18 @@ uint32_t Reconstruction::Remesh(uint32_t maxChunks) {
         impl.live[id] = true;
         impl.changed.push_back(ChunkUpdate{ToChunkKey(id), impl.OriginOf(id), vertexCount,
                                            indexCount});
+    }
+
+    if (impl.meshesInWindow >= Impl::kMeshTimingWindow) {
+        __android_log_print(ANDROID_LOG_INFO, kLogTag,
+                            "RECONPROBE remesh %.2f ms mean per chunk over %u chunks, colour %s. "
+                            "This covers marching cubes, ColorizeMesh and "
+                            "ComputeNormalsFromGradients together; the last two are per-vertex "
+                            "chunk lookups and are what colour made more expensive.",
+                            static_cast<double>(impl.meshNanosTotal) / impl.meshesInWindow / 1e6,
+                            impl.meshesInWindow, impl.config.colorEnabled ? "on" : "off");
+        impl.meshNanosTotal = 0;
+        impl.meshesInWindow = 0;
     }
     return done;
 }
@@ -678,6 +887,24 @@ bool Reconstruction::WriteChunk(const ChunkKey& key, Vertex* vertices, uint32_t 
         return false;
     }
 
+    // Colour is OPTIONAL, and the difference from the check above is deliberate.
+    // A mesh with no colours is the legitimate state of a build with
+    // colorEnabled off, and of any chunk meshed before colour was switched on;
+    // those get a zero confidence byte and the shader draws them flat. A mesh
+    // with SOME colours is a bug, and reading past the end of a short vector is
+    // exactly the silent kind.
+    const bool hasColor = !mesh.colors.empty();
+    if (hasColor &&
+        (mesh.colors.size() != mesh.vertices.size() ||
+         mesh.colorWeights.size() != mesh.vertices.size())) {
+        __android_log_print(ANDROID_LOG_ERROR, kLogTag,
+                            "RECONPROBE chunk %d,%d,%d has %zu vertices but %zu colours and %zu "
+                            "colour weights",
+                            key.x, key.y, key.z, mesh.vertices.size(), mesh.colors.size(),
+                            mesh.colorWeights.size());
+        return false;
+    }
+
     // The one place SoA becomes AoS, world becomes chunk-local, and size_t
     // becomes uint32. Writing straight into the caller's memory -- which may be
     // a mapped VkBuffer -- is why this takes a destination instead of returning
@@ -689,6 +916,25 @@ bool Reconstruction::WriteChunk(const ChunkKey& key, Vertex* vertices, uint32_t 
         vertices[i].position =
                 glm::vec3(position.x(), position.y(), position.z()) - origin;
         vertices[i].normal = glm::vec3(normal.x(), normal.y(), normal.z());
+
+        if (hasColor) {
+            // ColorizeMesh works in floats because it interpolates; the buffer
+            // is bytes because that is all the information there is. Rounding
+            // rather than truncating, so a channel that interpolated to exactly
+            // 1.0 lands on 255 instead of 254.
+            const chisel::Vec3& color = mesh.colors[i];
+            vertices[i].color[0] = ToByte(color.x());
+            vertices[i].color[1] = ToByte(color.y());
+            vertices[i].color[2] = ToByte(color.z());
+            vertices[i].color[3] = ToByte(mesh.colorWeights[i]);
+        } else {
+            vertices[i].color[0] = 0;
+            vertices[i].color[1] = 0;
+            vertices[i].color[2] = 0;
+            // Zero confidence, which is what tells the shader to ignore the
+            // three bytes above and draw the material's flat colour instead.
+            vertices[i].color[3] = 0;
+        }
     }
     for (uint32_t i = 0; i < indexCount; ++i) {
         indices[i] = static_cast<uint32_t>(mesh.indices[i]);

@@ -167,7 +167,23 @@ namespace chisel
 
             void GenerateMesh(const ChunkPtr& chunk, Mesh* mesh);
             void ColorizeMesh(Mesh* mesh);
-            Vec3 InterpolateColor(const Vec3& colorPos);
+
+            /**
+             * LOCAL MODIFICATION: reports the accumulated colour weight too,
+             * normalised to [0, 1] against `colorMaxWeight`.
+             *
+             * Not derivable from the returned colour, which is the whole point:
+             * an unobserved voxel and a black surface both interpolate to
+             * (0, 0, 0). See Mesh::colorWeights.
+             * */
+            Vec3 InterpolateColor(const Vec3& colorPos, float* weightOut);
+
+            /**
+             * LOCAL ADDITION: what InterpolateColor divides the accumulated
+             * ColorVoxel weight by to normalise it. Set to whatever ceiling the
+             * integrator was given, or the weights come back clipped at 1/255.
+             * */
+            inline void SetColorMaxWeight(uint8_t value) { colorMaxWeight = value; }
 
             void CacheCentroids();
             void ExtractBorderVoxelMesh(const ChunkPtr& chunk, const Eigen::Vector3i& index, const Eigen::Vector3f& coordinates, std::unordered_map<uint64_t, VertIndex>* edgeVertices, VertIndex* nextMeshIndex, Mesh* mesh);
@@ -207,6 +223,9 @@ namespace chisel
             Eigen::Matrix<int, 3, 8> cubeIndexOffsets;
             MeshMap allMeshes;
             bool useColor;
+
+            /** LOCAL ADDITION: see SetColorMaxWeight. 0 means normalise by 255. */
+            uint8_t colorMaxWeight = 0;
     };
 
     typedef std::shared_ptr<ChunkManager> ChunkManagerPtr;

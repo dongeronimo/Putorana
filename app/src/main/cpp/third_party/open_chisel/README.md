@@ -266,6 +266,57 @@ which is upstream's unbounded running mean. Unbounded means a voxel observed
 three hundred times cannot be corrected by fresh evidence at all, which is the
 other half of why nothing ever went away.
 
+### 7. Colour, fused in the depth path instead of the colour path
+
+`camera/YuvColorImage.h` (new), `ProjectionIntegrator.h`, `ColorVoxel.h`,
+`ChunkManager.cpp`, `mesh/Mesh.h`.
+
+Upstream has a complete colour path and **none of it is used here**, because
+`ProjectionIntegrator::IntegrateColor` is a parallel copy of `Integrate` that
+received none of changes 4 and 6 above. It still pads the band by
+`2·sqrt(3)·res`, still ignores the per-pixel weights, still has no ceiling, and
+still carries the `GetSDF() < 1e-5` carve test that cannot remove a surface.
+Switching to it would trade every correction in this file for colour.
+
+So colour is fused **inside `Integrate`**, in the branch that has already decided
+the voxel is inside the truncation band and already projected it.
+
+  * **`YuvColorImage`** replaces `ColorImage` for this path. `ColorImage` assumes
+    an interleaved BGR buffer that it owns (`delete [] data`), and a phone camera
+    delivers semi-planar YUV 4:2:0 in memory the capture API reclaims on the next
+    frame. It carries borrowed plane pointers and converts on demand, BT.601
+    studio swing, matching the app's `composite.frag` coefficient for
+    coefficient — the reconstruction is drawn directly in front of the feed it
+    was sampled from, so the two conversions disagreeing is immediately visible.
+  * **No second projection.** It also carries the affine map from a depth pixel
+    to a colour pixel. Upstream projects every voxel a second time through a
+    separate colour camera, which is right for a rig and wrong for a phone: the
+    depth map is a centre crop of the same sensor's image, so the two cameras
+    share a pose and differ only in intrinsics, and two pinholes at one pose
+    relate by `u_c = (fx_c/fx_d)·u_d + (cx_c − (fx_c/fx_d)·cx_d)`. One multiply
+    and one add per axis, on a projection already paid for.
+  * **`ColorVoxel::Integrate` takes a weight ceiling**, mirroring `DistVoxel`.
+    Upstream's caller instead froze the colour with `if (GetWeight() < 5)`, so the
+    first five frames of a sweep decided a voxel's colour permanently, with
+    auto-exposure still settling. A ceiling keeps the average running.
+  * **Carving resets the colour.** `DistVoxel::Carve` resets the distance voxel;
+    the `ColorVoxel` at the same index is a separate array and knew nothing about
+    it, so a removed object's colour outlived its geometry.
+  * **`ChunkManager::InterpolateColor` was dimensionally wrong** in two
+    independent places and could not have returned a correct colour. It computed
+    `floor(x / resolution)`, a voxel index, and passed it to `GetColorVoxel`,
+    which takes metres — at 4 cm voxels that is a lookup 25× too far from the
+    origin, so all eight failed, the null test fired, and every call fell through
+    to the nearest-neighbour fallback. The interpolation weights mixed metres with
+    indices in the same way. It is rewritten on the centroid grid, which is the
+    grid marching cubes actually interpolates along, and **weighted by each
+    corner's own colour weight**: an unobserved corner holds `(0, 0, 0)`, and
+    blending that as though it were black produces dark fringing wherever colour
+    coverage lags geometry coverage.
+  * **`Mesh` gains `colorWeights`**, one float per vertex. `colors` alone cannot
+    distinguish a black surface from a voxel never seen in colour, and the
+    renderer needs that to know whether to trust the colour or fall back.
+
 ## Verified
 
 All 16 translation units compile clean, zero errors and zero failures, for
@@ -277,6 +328,15 @@ assumed.
 It has since been run. The library reconstructs a room on a Samsung SM-S731B at
 30 fps with integration taking 19 ms for 111 chunks in view, and the dedup ratio
 above is a device measurement rather than a prediction.
+
+**Change 7, colour, is not in that measurement.** It compiles clean on the same
+target and has not yet been run on a device, so every number in it is reasoning
+rather than observation. Three things are worth confirming before believing it,
+and each has a `RECONPROBE` line waiting to answer it: whether the two scales of
+the depth-to-colour affine map really come out equal, what `ColorizeMesh` costs
+per remesh now that it does eight chunk lookups per vertex on top of the six
+`ComputeNormalsFromGradients` already did, and whether the fused colour matches
+the camera feed drawn immediately behind it.
 
 ## This library is always built optimised
 

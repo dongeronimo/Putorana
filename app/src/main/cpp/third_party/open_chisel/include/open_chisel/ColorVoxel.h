@@ -66,7 +66,32 @@ namespace chisel
                 weight = value;
             }
 
-            inline void Integrate(const uint8_t& newRed, const uint8_t& newGreen, const uint8_t& newBlue, const uint8_t& weightUpdate)
+            // LOCAL MODIFICATION: optional weight ceiling, replacing a freeze.
+            //
+            // maxWeight <= 0 keeps upstream behaviour, which is an unbounded
+            // running mean that stops accepting anything once the uint8 weight
+            // is about to overflow.
+            //
+            // Upstream's own caller made that worse. IntegrateColor guards this
+            // with `if (colorVoxel.GetWeight() < 5)`, so the first five
+            // observations decide a voxel's colour FOREVER. On a phone that is
+            // five consecutive frames of one sweep, with ARCore's auto-exposure
+            // and white balance still settling, from whatever angle happened to
+            // see the voxel first.
+            //
+            // A ceiling is the same instrument DistVoxel::Integrate uses and it
+            // is right here for the same reason: the average keeps running, so
+            // fresh evidence is always worth 1/(maxWeight+1) of the result, and
+            // a surface can still be corrected when the exposure changes or a
+            // better view of it arrives.
+            //
+            // The average is computed on GAMMA ENCODED values, which is not
+            // strictly correct -- the mean of two sRGB bytes is not the sRGB of
+            // their mean. Over samples of the same surface a frame apart the two
+            // differ far below a quantisation step, and decoding to linear would
+            // cost either a table lookup per channel per sample in the hot loop
+            // or a wider voxel. Not worth either.
+            inline void Integrate(const uint8_t& newRed, const uint8_t& newGreen, const uint8_t& newBlue, const uint8_t& weightUpdate, const uint8_t& maxWeight = 0)
             {
                 if(weight >= std::numeric_limits<uint8_t>::max() - weightUpdate)
                 {
@@ -85,7 +110,13 @@ namespace chisel
                 float updatedBlue = Saturate(static_cast<float>(weight * oldBlue + weightUpdate * newBlue) / (weightUpdate + weight));
                 blue = static_cast<uint8_t>(updatedBlue);
 
-                SetWeight(weight + weightUpdate);
+                // Only the STORED weight is clamped, exactly as in DistVoxel:
+                // the three channels above already used the true running mean
+                // for this update.
+                const int accumulated = static_cast<int>(weight) + static_cast<int>(weightUpdate);
+                SetWeight(maxWeight > 0 && accumulated > static_cast<int>(maxWeight)
+                                  ? maxWeight
+                                  : static_cast<uint8_t>(accumulated));
             }
 
             inline void Reset()
