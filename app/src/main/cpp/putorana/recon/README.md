@@ -350,6 +350,29 @@ entrenches them.
 The difference is that raw depth **says which samples those are**. That is what
 the confidence image is for, and using raw without it is using half the API.
 
+**Both streams are now acquired, and the argument above is why that is not a
+reversal.** Everything against automatic concerns pixels where raw depth exists.
+It says nothing about the 40% to 60% of pixels where raw reports zero, because
+there the alternative to a smoothed guess is not a better measurement, it is a
+hole, and no weighting scheme reaches a measurement that was never made.
+
+So the smoothed stream fills exactly those pixels, at `holeFillWeight`, and
+nowhere else. The restriction is structural rather than described: the fill lives
+inside the `millimetres == 0` branch of the conversion loop, so there is no
+arrangement of that code in which both sources contribute to one pixel.
+
+They do compete for the same VOXEL, which is what the weight arbitrates. A voxel
+is seen from many angles and a patch that is featureless from one is textured
+from another, so filled and measured samples land on it from different views. At
+0.05, a filled sample is worth what the weakest surviving raw sample is worth, so
+one confident observation outvotes twenty fills. Coverage where nothing else
+reaches, overruled wherever a real measurement arrives.
+
+The number to watch is `holeFillWeight` and not the truncation. The smoothed
+stream's error is **systematic**, so unlike a bad raw sample it does not average
+away with more views: too high reintroduces the rounded lumps and phantom slabs
+directly.
+
 ### The confidence map: MEASURED
 
 `ArFrame_acquireRawDepthConfidenceImage`, format `Y8`: one byte per depth sample,
@@ -1078,7 +1101,9 @@ and having the device decide removes the step where the numbers get read wrong.
 | `confidence map PRESENT` / `ABSENT` | whether the confidence half of raw depth is actually arriving. |
 | `first frame with data` | sample budget on a frame that actually has readings. Fires on the first such frame, not the first frame, because a stationary phone reports zero valid samples and a probe that speaks once would report 0% forever. |
 | `integrate N ms mean over 60 frames` | where the frame went. The CPU cost was known and assumed to be here before this existed, and the far plane was about to be cut on that assumption. |
-| `depth budget over the window` | how many samples ARCore never produced. Bounds what filtering can achieve. |
+| `depth budget over the window` | how many samples ARCore never produced. Bounds what filtering can achieve. Still counts a hole-filled pixel as having no estimate, because filling one does not turn it into a measurement. |
+| `hole fill over the window` | two ratios moving in opposite directions. *reached* is the benefit: how many of raw's holes the smoothed stream covered, and low means it is blank in the same places raw is. *standing on a guess* is the exposure: how much of everything fused is inpainted, and `holeFillWeight` is the lever. |
+| `SMOOTHED depth PRESENT / ABSENT` | whether hole fill has anything to work with at all. ABSENT means those pixels stay holes and the coverage numbers should be read as before. |
 | `confidence of the samples that DID exist` | the bimodal distribution above. Decides whether any threshold is meaningful. |
 | `chunk vertex counts ... in buckets of 512` | settles the mesh capacity in `worlds::openChisel::OpenChiselWorld`, which is fixed at creation. |
 | `dedup ratio` | 1.00 means the edge keys are not matching and vertex sharing is silently not happening, which looks identical on screen. |

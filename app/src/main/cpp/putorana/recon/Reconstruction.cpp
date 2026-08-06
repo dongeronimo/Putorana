@@ -240,6 +240,21 @@ struct Reconstruction::Impl {
     std::array<uint32_t, 8> confidenceHistogram{};
 
     /**
+     * Where the samples that WERE fused came from, over the same window.
+     *
+     * Two numbers rather than one because they answer different halves of
+     * whether hole fill is working. `windowFusedSamples` against
+     * `windowFilledSamples` says how much of the reconstruction is now standing
+     * on a guess, which is the risk. `windowFilledSamples` against
+     * `noEstimateSamples` says what fraction of the holes were actually reached,
+     * which is the benefit -- and it is not automatically high, because the
+     * smoothed stream can report zero in the same places raw does, and because
+     * a filled sample still has to survive the range clamp.
+     * */
+    uint32_t windowFusedSamples = 0;
+    uint32_t windowFilledSamples = 0;
+
+    /**
      * Samples walked in this window. Accumulated rather than derived from the
      * frame count, because frames that reject everything return before the
      * integration counter advances and would otherwise not appear in the
@@ -338,7 +353,7 @@ std::unique_ptr<Reconstruction> Reconstruction::Create(const Config& config, std
                         "depth [%.2f, %.2f] m, confidence gate %u/255 then weight "
                         "%.2f..1.00 to the power %.1f, colour %s (min weight %.2f, "
                         "max weight %u so one observation is worth 1/%u, fully trusted "
-                        "by the renderer at %u observations)",
+                        "by the renderer at %u observations), hole fill %s at weight %.2f",
                         config.chunkVoxels, config.voxelMetres,
                         config.chunkVoxels * config.voxelMetres, config.truncationQuadratic,
                         config.truncationLinear, config.truncationConstant, config.truncationScale,
@@ -349,7 +364,8 @@ std::unique_ptr<Reconstruction> Reconstruction::Create(const Config& config, std
                         config.colorEnabled ? "on" : "off", config.colorMinWeight,
                         static_cast<unsigned>(config.colorMaxWeight),
                         static_cast<unsigned>(config.colorMaxWeight) + 1u,
-                        static_cast<unsigned>(config.colorFullConfidenceWeight));
+                        static_cast<unsigned>(config.colorFullConfidenceWeight),
+                        config.holeFillEnabled ? "on" : "off", config.holeFillWeight);
     return reconstruction;
 }
 
@@ -433,9 +449,18 @@ void Reconstruction::Integrate(const ar::CameraFrame& frame) {
     const bool squaredCurve = weightExponent == 2.0f;
     const bool linearCurve = weightExponent == 1.0f;
 
+    // Hole fill from the smoothed stream. See Config::holeFillEnabled for why
+    // this does not contradict the decision to integrate raw depth.
+    const auto* smoothedBase = reinterpret_cast<const uint8_t*>(depth.smoothedMillimetres);
+    const bool useHoleFill = impl.config.holeFillEnabled && smoothedBase != nullptr &&
+                             depth.smoothedRowStrideBytes > 0 &&
+                             impl.config.holeFillWeight > 0.0f;
+    const float holeFillWeight = impl.config.holeFillWeight;
+
     uint32_t validSamples = 0;
     uint32_t rejectedSamples = 0;
     uint32_t lowConfidenceSamples = 0;
+    uint32_t filledSamples = 0;
     float observedMax = 0.0f;
     double weightSum = 0.0;
     for (int32_t row = 0; row < depth.height; ++row) {
@@ -447,6 +472,13 @@ void Reconstruction::Integrate(const ar::CameraFrame& frame) {
                 useConfidence ? depth.confidence + static_cast<size_t>(row) *
                                                            depth.confidenceRowStrideBytes
                               : nullptr;
+        // Its own stride again. Same dimensions as the raw map, which
+        // ar::Subsystem checks rather than assumes before handing it over.
+        const auto* smoothedRow =
+                useHoleFill ? reinterpret_cast<const uint16_t*>(
+                                      smoothedBase + static_cast<size_t>(row) *
+                                                             depth.smoothedRowStrideBytes)
+                            : nullptr;
         float* destination = out + static_cast<size_t>(row) * depth.width;
         float* weightDestination = weightOut + static_cast<size_t>(row) * depth.width;
         for (int32_t column = 0; column < depth.width; ++column) {
@@ -458,8 +490,52 @@ void Reconstruction::Integrate(const ar::CameraFrame& frame) {
 
             const uint16_t millimetres = source[column];
             if (millimetres == 0) {
-                destination[column] = kNaN;
+                // --- the only place the smoothed stream is allowed to speak ---
+                //
+                // Inside the `millimetres == 0` branch and nowhere else, which is
+                // what enforces "never both for the same pixel". That restriction
+                // is the whole safety of this feature: the smoothed stream is
+                // temporally fused and inpainted, so using it where raw already
+                // has a value reintroduces the rounded lumps and phantom slabs
+                // that got it rejected for integration. Written as a branch rather
+                // than as a preference between two candidate values so that there
+                // is no arrangement of the code in which both can contribute.
+                //
+                // Counted as "no estimate" regardless. This counter describes what
+                // ARCore's stereo could MEASURE, and filling a hole does not turn
+                // it into a measurement. Conflating the two would quietly retire
+                // the one number that says how much of the frame is guesswork.
                 ++impl.noEstimateSamples;
+
+                if (smoothedRow != nullptr) {
+                    const uint16_t filled = smoothedRow[column];
+                    if (filled != 0) {
+                        const float metres = static_cast<float>(filled) * 0.001f;
+                        // The same range clamp the raw path applies, and for the
+                        // same reason: the far plane Chisel integrates against
+                        // comes from the furthest surviving sample, and the
+                        // smoothed stream inpaints regions raw never reached, so
+                        // it is if anything MORE able to push a stray value out
+                        // to 65 metres.
+                        if (metres >= impl.config.nearPlane &&
+                            metres <= impl.config.farPlane) {
+                            destination[column] = metres;
+                            // Fixed and low. There is no confidence map for this
+                            // stream, and there could not be a useful one: its
+                            // error is systematic rather than uncertain. See
+                            // Config::holeFillWeight for why the number is the
+                            // confidence floor.
+                            weightDestination[column] = holeFillWeight;
+                            observedMax = std::max(observedMax, metres);
+                            weightSum += holeFillWeight;
+                            ++filledSamples;
+                            ++validSamples;
+                            continue;
+                        }
+                    }
+                }
+
+                destination[column] = kNaN;
                 continue;
             }
 
@@ -548,6 +624,8 @@ void Reconstruction::Integrate(const ar::CameraFrame& frame) {
     // below threshold.
     impl.windowSamples +=
             static_cast<uint32_t>(depth.width) * static_cast<uint32_t>(depth.height);
+    impl.windowFusedSamples += validSamples;
+    impl.windowFilledSamples += filledSamples;
 
     if (validSamples == 0) {
         ++impl.emptyFrames;
@@ -641,7 +719,8 @@ void Reconstruction::Integrate(const ar::CameraFrame& frame) {
                 static_cast<double>(impl.integrateNanosTotal) / impl.integrationsInWindow / 1e6;
         __android_log_print(ANDROID_LOG_INFO, kLogTag,
                             "RECONPROBE integrate %.1f ms mean over %u frames; %u chunks held, "
-                            "%u awaiting remesh; last frame %u fused at mean weight %.2f / "
+                            "%u awaiting remesh; last frame %u fused (%u of them hole fill) at "
+                            "mean weight %.2f / "
                             "%u below confidence %u / %u out of [%.1f, %.1f] m, "
                             "furthest accepted %.2f m; %u frames skipped as empty; "
                             "%u chunks emptied by carving so far",
@@ -649,7 +728,7 @@ void Reconstruction::Integrate(const ar::CameraFrame& frame) {
                             static_cast<uint32_t>(
                                     impl.chisel->GetChunkManager().GetChunks().size()),
                             pendingRemeshCount(),
-                            validSamples,
+                            validSamples, filledSamples,
                             validSamples > 0 ? weightSum / validSamples : 0.0,
                             lowConfidenceSamples,
                             static_cast<unsigned>(impl.config.confidenceThreshold),
@@ -662,6 +741,32 @@ void Reconstruction::Integrate(const ar::CameraFrame& frame) {
                             "not match -- untextured surfaces -- and no weighting reaches them.",
                             100.0 * impl.noEstimateSamples / std::max(impl.windowSamples, 1u),
                             impl.noEstimateSamples, impl.windowSamples);
+
+        if (impl.config.holeFillEnabled) {
+            // The two ratios that decide whether this feature is earning its
+            // risk, and they move in opposite directions.
+            //
+            //   reached    of the holes raw left, how many the smoothed stream
+            //              covered. This is the benefit. Low means the smoothed
+            //              stream is blank in the same places raw is, and the
+            //              feature is doing nothing.
+            //   standing   of everything fused, how much came from a guess. This
+            //              is the exposure. High means the reconstruction is
+            //              mostly inpainting, and holeFillWeight is the lever --
+            //              the smoothed stream's error is systematic, so it does
+            //              not average away with more views.
+            __android_log_print(
+                    ANDROID_LOG_INFO, kLogTag,
+                    "RECONPROBE hole fill over the window: reached %.0f%% of the holes "
+                    "(%u filled of %u with no estimate); %.0f%% of everything fused is now "
+                    "smoothed rather than measured (%u of %u), each at weight %.2f against "
+                    "up to 1.00 for a confident raw sample",
+                    100.0 * impl.windowFilledSamples / std::max(impl.noEstimateSamples, 1u),
+                    impl.windowFilledSamples, impl.noEstimateSamples,
+                    100.0 * impl.windowFilledSamples / std::max(impl.windowFusedSamples, 1u),
+                    impl.windowFilledSamples, impl.windowFusedSamples,
+                    impl.config.holeFillWeight);
+        }
 
         if (impl.histogramSamples > 0) {
             __android_log_print(
@@ -721,6 +826,8 @@ void Reconstruction::Integrate(const ar::CameraFrame& frame) {
         impl.noEstimateSamples = 0;
         impl.histogramSamples = 0;
         impl.windowSamples = 0;
+        impl.windowFusedSamples = 0;
+        impl.windowFilledSamples = 0;
         impl.confidenceHistogram.fill(0);
     }
 
@@ -738,11 +845,14 @@ void Reconstruction::Integrate(const ar::CameraFrame& frame) {
                 static_cast<uint32_t>(depth.width) * static_cast<uint32_t>(depth.height);
         __android_log_print(ANDROID_LOG_INFO, kLogTag,
                             "RECONPROBE first frame with data: %u of %u samples valid (%.0f%%), "
+                            "%u of those from hole fill (smoothed stream %s), "
                             "%u below confidence %u/255 (map %s), "
                             "%u rejected as out of [%.2f, %.2f] m, furthest accepted %.2f m. "
                             "The frustum -- and so the number of chunks allocated -- is built "
-                            "from the FURTHEST accepted sample, and grows with its cube.",
+                            "from the FURTHEST accepted sample, and grows with its cube, so "
+                            "filling holes at distance costs chunks as well as buying coverage.",
                             validSamples, totalSamples, 100.0 * validSamples / totalSamples,
+                            filledSamples, useHoleFill ? "present" : "ABSENT",
                             lowConfidenceSamples,
                             static_cast<unsigned>(impl.config.confidenceThreshold),
                             useConfidence ? "present" : "ABSENT",

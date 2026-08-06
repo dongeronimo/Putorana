@@ -232,6 +232,41 @@ struct DepthImage {
     int32_t confidenceRowStrideBytes = 0;
 
     /**
+     * The SMOOTHED depth stream for the same frame, or null when it could not be
+     * acquired. Same units, same dimensions, same borrowing rules as
+     * `millimetres`.
+     *
+     * ## Why both streams, when one of them was rejected outright
+     *
+     * `millimetres` above is raw depth, and it is raw on purpose: ARCore has
+     * already fused the smoothed stream temporally, so integrating it averages
+     * correlated data and converges on the smoothing rather than on the surface.
+     * Its inpainted regions are worse still, because the mean of a hundred views
+     * of the same guess is the guess. That reasoning is in
+     * recon/README.md and it has not changed.
+     *
+     * But it only holds where raw depth EXISTS. Between 40% and 60% of raw
+     * samples arrive as zero on this device, because ARCore's depth here is
+     * motion stereo on one RGB camera and a blank painted wall has nothing to
+     * match. At those pixels the alternative to a smoothed guess is not a better
+     * measurement, it is a hole, and no weighting scheme reaches a measurement
+     * that was never made.
+     *
+     * So this exists to fill exactly those pixels, at a low weight, and nowhere
+     * else. Whoever consumes it owes that restriction: using it where raw already
+     * has a value reintroduces precisely the rounded lumps and phantom slabs that
+     * got the smoothed stream rejected. See recon::Config::holeFillWeight.
+     *
+     * Costs one extra acquisition and no session reconfiguration, because
+     * AR_DEPTH_MODE_AUTOMATIC exposes both streams and is the mode Create already
+     * sets.
+     * */
+    const uint16_t* smoothedMillimetres = nullptr;
+
+    /** Distance between smoothed row starts, in BYTES, not in uint16s. */
+    int32_t smoothedRowStrideBytes = 0;
+
+    /**
      * Intrinsics expressed against THIS image's dimensions.
      *
      * Not what ARCore handed over: it describes the CPU image, which is several
@@ -483,6 +518,8 @@ private:
     void* depthImage_ = nullptr;
     /** The confidence map for depthImage_. Released alongside it. */
     void* confidenceImage_ = nullptr;
+    /** The smoothed stream for the same frame. Released alongside it too. */
+    void* smoothedDepthImage_ = nullptr;
     /** Allocated once and reused: ArPose_create every frame would be litter. */
     void* pose_ = nullptr;
     /** Likewise, and reused for both the image and the depth reads. */
@@ -506,6 +543,9 @@ private:
 
     /** And for the confidence map, which fails independently of the depth. */
     bool warnedAboutConfidence_ = false;
+
+    /** And for the smoothed stream, which fails independently of both. */
+    bool warnedAboutSmoothed_ = false;
 
     /**
      * So the first depth map that arrives gets its dimensions and rescaled

@@ -311,6 +311,15 @@ void Subsystem::ReleaseImage() {
         ArImage_release(Image(confidenceImage_));
         confidenceImage_ = nullptr;
     }
+    // A fourth acquisition against the same pool. Same rule again, and the
+    // arithmetic is now worth stating: this app holds the camera image, raw
+    // depth, its confidence map and the smoothed stream at once. All four are
+    // released here at the top of every Update, so the pool never sees more than
+    // one frame's worth outstanding, which is what keeps it under ARCore's limit.
+    if (smoothedDepthImage_ != nullptr) {
+        ArImage_release(Image(smoothedDepthImage_));
+        smoothedDepthImage_ = nullptr;
+    }
 }
 
 void Subsystem::ReadCamera() {
@@ -581,6 +590,63 @@ void Subsystem::ReadDepthImage() {
                             StatusName(confidenceAcquired));
     }
 
+    // --- the smoothed stream, as hole fill and nothing else ---
+    //
+    // The one ARCore has already fused temporally, which is why the reconstruction
+    // does not integrate it: averaging correlated data converges on the smoothing
+    // rather than on the surface, and its inpainted regions are a guess whose mean
+    // over a hundred views is the same guess.
+    //
+    // That argument covers every pixel where raw depth exists. It says nothing
+    // about the 40-60% of pixels where raw reports zero, because there the
+    // alternative to a smoothed guess is a hole. This is acquired to fill those
+    // and only those; the restriction lives at the consumer, in
+    // Reconstruction::Integrate.
+    //
+    // Best effort, like the confidence map, and for the same reason: a device
+    // that gives raw but refuses this still reconstructs, just with the holes it
+    // had before.
+    ArImage* smoothed = nullptr;
+    const ArStatus smoothedAcquired = ArFrame_acquireDepthImage16Bits(session, frame, &smoothed);
+    if (smoothedAcquired == AR_SUCCESS && smoothed != nullptr) {
+        smoothedDepthImage_ = smoothed;
+
+        int32_t smoothedWidth = 0;
+        int32_t smoothedHeight = 0;
+        ArImage_getWidth(session, smoothed, &smoothedWidth);
+        ArImage_getHeight(session, smoothed, &smoothedHeight);
+
+        const uint8_t* smoothedBytes = nullptr;
+        int32_t smoothedLength = 0;
+        ArImage_getPlaneData(session, smoothed, 0, &smoothedBytes, &smoothedLength);
+        ArImage_getPlaneRowStride(session, smoothed, 0, &out.smoothedRowStrideBytes);
+
+        // Checked rather than assumed, exactly as for the confidence map. The
+        // consumer indexes this with the raw stream's row and column, so a
+        // different size would fill each hole with the depth of some other part
+        // of the scene -- geometry that is plausible, wrong, and impossible to
+        // tell from a reconstruction artefact.
+        if (smoothedBytes != nullptr && smoothedWidth == out.width &&
+            smoothedHeight == out.height) {
+            out.smoothedMillimetres = reinterpret_cast<const uint16_t*>(smoothedBytes);
+        } else {
+            out.smoothedRowStrideBytes = 0;
+            if (!warnedAboutSmoothed_) {
+                warnedAboutSmoothed_ = true;
+                __android_log_print(ANDROID_LOG_ERROR, kLogTag,
+                                    "RECONPROBE smoothed depth is %dx%d but raw is %dx%d; ARCore "
+                                    "documents them as equal. No hole fill.",
+                                    smoothedWidth, smoothedHeight, out.width, out.height);
+            }
+        }
+    } else if (smoothedAcquired != AR_ERROR_NOT_YET_AVAILABLE && !warnedAboutSmoothed_) {
+        warnedAboutSmoothed_ = true;
+        __android_log_print(ANDROID_LOG_ERROR, kLogTag,
+                            "RECONPROBE ArFrame_acquireDepthImage16Bits failed: %s. Pixels where "
+                            "raw depth has no estimate will stay holes.",
+                            StatusName(smoothedAcquired));
+    }
+
     // Intrinsics belong to the CPU image, which is several times larger than
     // this one, and NOT the same shape. Getting from one to the other is a crop
     // followed by a scale, and both halves matter.
@@ -694,6 +760,12 @@ void Subsystem::ReadDepthImage() {
                             "%s confidence map %s, stride %d bytes (tight would be %d)",
                             kProbe, out.confidence != nullptr ? "PRESENT" : "ABSENT",
                             out.confidenceRowStrideBytes, out.width);
+
+        __android_log_print(ANDROID_LOG_INFO, kLogTag,
+                            "%s SMOOTHED depth %s, stride %d bytes. Used only where raw has no "
+                            "estimate; ABSENT means those pixels stay holes.",
+                            kProbe, out.smoothedMillimetres != nullptr ? "PRESENT" : "ABSENT",
+                            out.smoothedRowStrideBytes);
 
         // A mismatch here is NOT a failure any more — it is the measured reality
         // on this hardware (16:9 depth from a 4:3 image) and the rescale handles

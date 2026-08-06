@@ -234,6 +234,57 @@ struct Config {
     float confidenceWeightExponent = 2.0f;
 
     /**
+     * Fill pixels where RAW depth has no estimate with the smoothed stream.
+     *
+     * ## This is not a reversal of the decision to use raw depth
+     *
+     * The smoothed stream was rejected for integration and stays rejected: ARCore
+     * has already fused it temporally, so averaging it converges on the smoothing
+     * rather than the surface, and its inpainted regions are a guess whose mean
+     * over a hundred views is the same guess. That produced a flat floor
+     * reconstructed as rounded lumps and planar slabs standing where nothing is.
+     *
+     * All of which is true wherever raw depth EXISTS. It says nothing about the
+     * 40% to 60% of pixels where raw reports zero, because there the alternative
+     * to a smoothed guess is not a better measurement, it is a hole, and no
+     * weighting scheme reaches a measurement that was never made. That gap is the
+     * largest remaining limit on coverage and it cannot be closed inside the
+     * integrator.
+     *
+     * NEVER both for the same pixel. That restriction is the entire safety of
+     * this feature, and it is enforced in the conversion loop rather than
+     * described here.
+     * */
+    bool holeFillEnabled = true;
+
+    /**
+     * The integration weight a filled sample gets, on the same scale as the
+     * confidence weights, where 1.0 is a fully confident raw measurement.
+     *
+     * ## Why the number is the confidence floor and not something smaller
+     *
+     * The two sources never compete for the same PIXEL, by construction. They
+     * compete constantly for the same VOXEL: a voxel is seen from many views, and
+     * a patch that is featureless from one angle is textured from another, so the
+     * same voxel receives filled samples from some views and real ones from
+     * others.
+     *
+     * That is what this number arbitrates. At 0.05 a filled sample is worth
+     * exactly what the weakest raw sample that survives the confidence gate is
+     * worth, so a single confident observation outvotes twenty filled ones. Fill
+     * therefore builds a continuous surface where nothing else can, and is
+     * overruled everywhere a real measurement eventually arrives. That is the
+     * whole intent.
+     *
+     * Start low and raise carefully. The smoothed stream's error is SYSTEMATIC
+     * rather than noisy, so it does not average away with more views the way a
+     * bad raw sample does; too high here reintroduces the lumps and slabs
+     * directly. If the reconstruction comes back smooth but wrong, this is the
+     * number, not the truncation.
+     * */
+    float holeFillWeight = 0.05f;
+
+    /**
      * Depth range to trust, in metres.
      *
      * The far plane is the most expensive number in this struct, and not because
@@ -284,6 +335,22 @@ struct Config {
      * puts the surface roughly right and can take its colour from whatever the
      * search happened to land on, so if colour comes out noisier than the
      * geometry does, this is the lever.
+     *
+     * ## It is also the lever over hole fill
+     *
+     * A hole-filled sample arrives here at holeFillWeight, so at the default of 0
+     * it paints colour like any other. That is defensible and not obviously
+     * right. The camera pixel is a real measurement whatever the stereo did with
+     * it, so the colour is correct as long as the GEOMETRY the fill invented is
+     * roughly correct; where it is not, a confidently wrong colour lands on a
+     * confidently wrong surface. Worse, colour is integrated at a flat weight of
+     * 1 regardless of this, so a voxel that received ten filled samples and one
+     * confident raw sample takes its geometry from the raw one and its colour
+     * mostly from the filled ones.
+     *
+     * Set this just above holeFillWeight to make filled samples build geometry
+     * without painting it. That is the thing to reach for if colour smears or
+     * looks confidently wrong specifically in the regions the fill created.
      * */
     float colorMinWeight = 0.0f;
 
