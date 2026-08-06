@@ -78,4 +78,19 @@ object NativeRenderer {
      * frame is produced late.
      */
     external fun drawFrame(frameTimeNanos: Long)
+
+    /**
+     * Switches the scene. [worldId] is [WorldId.nativeId]; an id the renderer
+     * does not know is logged and ignored, leaving the current scene up.
+     *
+     * Asynchronous in the only sense that matters: this records the request and
+     * returns, and the teardown of the old world and the build of the new one
+     * happen inside the next [drawFrame]. That is not an optimisation — a world
+     * builds its pipelines against the swapchain's format, and the frame loop is
+     * the only thing that knows there is a swapchain.
+     *
+     * Asking for the world already showing rebuilds it, which is the cheapest
+     * way to exercise the load/unload path without backgrounding the app.
+     */
+    external fun setWorld(worldId: Int)
 }

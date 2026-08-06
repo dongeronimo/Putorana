@@ -83,6 +83,20 @@ class RenderThread {
     }
 
     /**
+     * Asks the renderer for a different world. Posted rather than called
+     * straight through, because the caller is the UI thread — a menu tap — and
+     * the native side takes no locks precisely because everything reaches it on
+     * this one thread.
+     *
+     * Fire and forget: building a world reads assets and compiles pipelines, and
+     * there is nothing the UI would do with the outcome that logcat does not
+     * already say better.
+     */
+    fun setWorld(worldId: Int) {
+        handler.post { NativeRenderer.setWorld(worldId) }
+    }
+
+    /**
      * Stops the loop, tears the native side down and joins the thread. Blocks,
      * because the caller is SurfaceHolder.Callback.surfaceDestroyed and Android
      * invalidates the Surface the moment that returns: anything still touching

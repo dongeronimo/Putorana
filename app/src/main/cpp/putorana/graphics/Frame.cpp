@@ -1,9 +1,9 @@
 #include "Frame.h"
 
 #include "Device.h"
-#include "HelloWorld.h"
 #include "World.h"
 #include "putorana/ar/Subsystem.h"
+#include "putorana/worlds/WorldRegistry.h"
 
 #include <android/log.h>
 
@@ -26,45 +26,6 @@ uint32_t g_framesSinceReport = 0;
 
 /** Vsync timestamp of the previous frame, for the delta handed to the world. */
 int64_t g_lastFrameNanos = 0;
-
-/**
- * Set once a world has been attempted for the current surface, whether or not it
- * worked. Without it a world that fails to build is retried sixty times a second
- * — sixty identical stack traces in logcat, and sixty rounds of allocating and
- * releasing whatever it got through before failing.
- * */
-bool g_worldAttempted = false;
-
-/**
- * Builds the scene, the first frame there is a swapchain to build it against.
- *
- * Here and not in Device::OnSurfaceCreated because a world's pipelines are built
- * for the surface's colour format, which is only known once the swapchain
- * exists — and the swapchain is created by the frame loop, on demand.
- *
- * This is also the one place that names a concrete world. Everything else in
- * this namespace only knows the World interface, so choosing a different scene
- * is a change to this function and nowhere else.
- * */
-void InstallWorldIfNeeded(Device& device) {
-    if (g_worldAttempted || device.world() != nullptr) {
-        return;
-    }
-    g_worldAttempted = true;
-
-    auto world = std::make_unique<HelloWorld>(device);
-    std::string error;
-    if (!world->CreateRenderPasses(device.swapchain(), error)) {
-        __android_log_print(ANDROID_LOG_ERROR, kLogTag, "world render passes failed: %s",
-                            error.c_str());
-        return;
-    }
-    if (!world->CreateWorld(error)) {
-        __android_log_print(ANDROID_LOG_ERROR, kLogTag, "world content failed: %s", error.c_str());
-        return;
-    }
-    device.SetWorld(std::move(world));
-}
 
 /**
  * Seconds since the previous frame, clamped.
@@ -282,8 +243,15 @@ void DrawFrame(int64_t frameTimeNanos) {
 
     Heartbeat(frameTimeNanos);
 
-    // Needs the swapchain, which RecreateSwapchainIfNeeded has just guaranteed.
-    InstallWorldIfNeeded(device);
+    // Builds the first world, and every world the menu switches to afterwards.
+    // Here and not in Device::OnSurfaceCreated because a world's pipelines are
+    // built for the surface's colour format, which is only known once the
+    // swapchain exists — and RecreateSwapchainIfNeeded has just guaranteed one.
+    //
+    // This namespace no longer names a concrete world at all: which scene is
+    // showing is putorana::worlds' business, and everything here works through
+    // the World interface.
+    worlds::InstallIfNeeded(device);
 
     // The AR session's tick, and it is FIRST for two reasons.
     //
@@ -421,10 +389,10 @@ void ResetFrameStats() {
     // measures across however long the app spent in background, and the clamp
     // in DeltaSeconds would be doing the work a reset should have done.
     g_lastFrameNanos = 0;
-    // The world went with the device, so the next surface gets a fresh attempt.
-    // This is the "no loading once at startup" rule made concrete: the whole
-    // scene is rebuilt every time the app comes back from background.
-    g_worldAttempted = false;
+    // The world went with the device. The registry keeps WHICH world was being
+    // shown and only forgets that it built it, so the next surface rebuilds the
+    // same one.
+    worlds::OnSurfaceLost();
 }
 
 } // namespace putorana::graphics

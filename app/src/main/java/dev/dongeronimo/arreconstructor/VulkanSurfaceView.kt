@@ -28,6 +28,21 @@ class VulkanSurfaceView @JvmOverloads constructor(
 
     private var renderThread: RenderThread? = null
 
+    /**
+     * A world picked while there was no render thread to tell, replayed when one
+     * appears. Null the rest of the time.
+     *
+     * Nearly unreachable — the menu sits on top of this view, and there is no
+     * surface only while the activity is on its way out — but a request that is
+     * silently dropped looks exactly like a switch that does not work, and this
+     * is cheaper than ruling that out later.
+     *
+     * Nothing is stashed once the thread exists: the renderer remembers which
+     * world it was asked for across surface loss, so coming back from background
+     * needs no replay at all.
+     */
+    private var pendingWorld: WorldId? = null
+
     init {
         // Before the callback is registered, so it cannot lose a race with a
         // surface that already exists: the world is loaded from assets the
@@ -46,7 +61,28 @@ class VulkanSurfaceView @JvmOverloads constructor(
      * dimensions show up and where the frame loop starts.
      */
     override fun surfaceCreated(holder: SurfaceHolder) {
-        renderThread = RenderThread().apply { surfaceCreated(holder.surface) }
+        val thread = RenderThread().apply { surfaceCreated(holder.surface) }
+        renderThread = thread
+        pendingWorld?.let {
+            pendingWorld = null
+            thread.setWorld(it.nativeId)
+        }
+    }
+
+    /**
+     * Shows a different world. The switch itself happens on the render thread,
+     * inside the next frame; see [NativeRenderer.setWorld].
+     *
+     * Here rather than on the Activity because the render thread is this view's,
+     * and it is this view's precisely because it lives and dies with the surface.
+     */
+    fun setWorld(world: WorldId) {
+        val thread = renderThread
+        if (thread == null) {
+            pendingWorld = world
+            return
+        }
+        thread.setWorld(world.nativeId)
     }
 
     override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {

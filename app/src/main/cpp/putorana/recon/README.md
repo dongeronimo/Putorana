@@ -1016,7 +1016,7 @@ and having the device decide removes the step where the numbers get read wrong.
 | `integrate N ms mean over 60 frames` | where the frame went. The CPU cost was known and assumed to be here before this existed, and the far plane was about to be cut on that assumption. |
 | `depth budget over the window` | how many samples ARCore never produced. Bounds what filtering can achieve. |
 | `confidence of the samples that DID exist` | the bimodal distribution above. Decides whether any threshold is meaningful. |
-| `chunk vertex counts ... in buckets of 512` | settles the mesh capacity in `graphics::HelloWorld`, which is fixed at creation. |
+| `chunk vertex counts ... in buckets of 512` | settles the mesh capacity in `worlds::openChisel::OpenChiselWorld`, which is fixed at creation. |
 | `dedup ratio` | 1.00 means the edge keys are not matching and vertex sharing is silently not happening, which looks identical on screen. |
 
 ---

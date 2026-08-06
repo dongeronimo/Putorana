@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- How far every overlay keeps from the edge of the screen. Named rather
+         than repeated because the inset handling in MainActivity has to add the
+         cutout on top of it, and a literal there would go out of step with the
+         layout the first time either changed. -->
+    <dimen name="overlay_margin">12dp</dimen>
+</resources>

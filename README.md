@@ -325,7 +325,9 @@ To reconstruct the real world into the virtual world so that I can use this data
 
 ---
 
-### HelloWorld (cpp, putorana::graphics::HelloWorld)
+### OpenChiselWorld (cpp, putorana::worlds::openChisel::OpenChiselWorld)
+> Called ```graphics::HelloWorld``` until the worlds moved under ```putorana::worlds```. Most of what follows describes the cube it was built around, which was removed with the space carving work — see the class comment for what it does now. The name went to ```worlds::hello::HelloWorld```, which is a hello world again.
+
 - The first world: the cube from ```unitary_cube.glb``` under ROOT, spinning, and a second node carrying the camera — over the live camera feed when there is an AR session.
 - It exists to exercise the whole chain at once — asset read, glTF parse, mesh upload, node graph, material, pipeline cache, instanced draw, camera upload, composite — with the smallest content that can show any of it is wrong. A cube is unforgiving on purpose: wrong winding hides the faces you should see and shows the ones you should not, wrong depth order draws the far faces over the near ones, and wrong normals flatten it into a hexagon. Over a camera feed it also stops being a picture and starts being a measurement: geometry that slides when the phone moves is a projection or a pose bug, and nothing else looks like that.
 - **Which KIND of camera is the one decision this world makes about AR.** With a session, ARCore owns both the projection and the pose and the node's transform becomes an OUTPUT. Without one — no ARCore, no permission, an unsupported device — it is a ```PerspectiveCamera``` at (2,3,5) aimed at the origin, exactly as it was before, so the cube is still visible on a device that cannot do AR at all.
@@ -336,7 +338,9 @@ To reconstruct the real world into the virtual world so that I can use this data
 - ```LookAt``` in ```CreateWorld``` works because it uses ```ComputeWorldMatrix```, which walks the parent chain rather than trusting the cache — and the cache is empty there, since no frame has run.
 - The spin accumulates degrees and never wraps, which is exactly what the unbounded Euler interface is for: the angle climbs past 360 and the quaternion it drives stays well behaved.
 - ```Update``` calls the base LAST, and takes the AR frame FIRST. The base is what closes every world matrix, so anything moved after it would land a frame late; the AR pose is what everything else this frame is measured against. This is the seam behaviours will replace.
-- ```Frame.cpp``` is the only place that names a concrete world; everything else in the namespace knows the World interface. It builds the world on the first frame with a swapchain — not in ```OnSurfaceCreated``` — because pipelines are built for the surface's colour format, and it latches a flag so a world that fails to build is not retried sixty times a second.
+- ```putorana::worlds::WorldRegistry``` is the only place that names a concrete world; the frame loop, the Device and the JNI layer all know only the World interface. It builds on the first frame with a swapchain — not in ```OnSurfaceCreated``` — because pipelines are built for the surface's colour format, and it latches a flag so a world that fails to build is not retried sixty times a second.
+- Switching worlds destroys the old one BEFORE building the new one. Two worlds' render targets and chunk meshes alive at once is a real peak on a device this reconstruction has already taken out of memory twice, and keeping the old one as a fallback would be a fiction — its targets were built for this swapchain and nothing puts it back. The cost is that a world which fails to build leaves the placeholder clear rather than the previous scene, which is the more honest picture anyway.
+- The REQUESTED world outlives the Device; only the "already built it" latch is cleared when the surface goes. So an app backgrounded on OpenChisel comes back on OpenChisel, and Kotlin never re-sends anything.
 
 ---
 
