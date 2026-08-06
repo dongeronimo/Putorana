@@ -350,28 +350,58 @@ entrenches them.
 The difference is that raw depth **says which samples those are**. That is what
 the confidence image is for, and using raw without it is using half the API.
 
-**Both streams are now acquired, and the argument above is why that is not a
-reversal.** Everything against automatic concerns pixels where raw depth exists.
-It says nothing about the 40% to 60% of pixels where raw reports zero, because
-there the alternative to a smoothed guess is not a better measurement, it is a
-hole, and no weighting scheme reaches a measurement that was never made.
+### Hole fill from the smoothed stream: BUILT, MEASURED, TURNED OFF
 
-So the smoothed stream fills exactly those pixels, at `holeFillWeight`, and
-nowhere else. The restriction is structural rather than described: the fill lives
-inside the `millimetres == 0` branch of the conversion loop, so there is no
-arrangement of that code in which both sources contribute to one pixel.
+Both streams are acquired. The smoothed one is used to fill pixels where raw
+reports zero, at a low weight, and **the feature ships disabled**. It was built,
+run on the device and switched off the same afternoon. The mechanism works; the
+design was wrong, and the way it is wrong is worth keeping.
 
-They do compete for the same VOXEL, which is what the weight arbitrates. A voxel
-is seen from many angles and a patch that is featureless from one is textured
-from another, so filled and measured samples land on it from different views. At
-0.05, a filled sample is worth what the weakest surviving raw sample is worth, so
-one confident observation outvotes twenty fills. Coverage where nothing else
-reaches, overruled wherever a real measurement arrives.
+**The argument for it.** Everything against automatic concerns pixels where raw
+depth exists. It says nothing about pixels where raw reports zero, because there
+the alternative to a smoothed guess is a hole, and no weighting scheme reaches a
+measurement that was never made. So fill exactly those, at `holeFillWeight`, and
+let real measurements overrule it. The restriction is structural rather than
+described: the fill lives inside the `millimetres == 0` branch of the conversion
+loop, so no arrangement of that code lets both sources contribute to one pixel.
 
-The number to watch is `holeFillWeight` and not the truncation. The smoothed
-stream's error is **systematic**, so unlike a bad raw sample it does not average
-away with more views: too high reintroduces the rounded lumps and phantom slabs
-directly.
+**Why the weight was supposed to make it safe.** The two never compete for one
+pixel, but they do compete for one VOXEL, since a patch that is featureless from
+one angle is textured from another. At 0.05 a confident raw sample outvotes
+twenty fills.
+
+**Why that fails exactly where it matters.** On a plainly painted wall raw depth
+returns nothing from *any* angle, because there is no texture to match from any
+angle. No competing sample ever arrives, the weight arbitrates nothing, and the
+wall is built entirely from inpainting. Lowering `holeFillWeight` does not make
+it less wrong, only slower to appear. **The holes and the danger are the same set
+of pixels**, and the design treated them as separable.
+
+**Measured before switching it off**, 2026-08-06:
+
+| | |
+|---|---|
+| holes reached | **100%** in nearly every window. It works. |
+| fused samples that were inpainted | up to **88%**, and one frame reported **13921 of 13939** |
+| chunks held | 81 without fill, **150** with |
+| remesh per chunk | 0.55 ms without, **0.97 ms** with |
+| integration | up to **33 ms** |
+
+Nearly double the memory, in an app that has twice died with the allocator out of
+memory once the node count climbed, spent on inventing the walls that then looked
+worse than no walls at all.
+
+**What a second attempt needs.** Not a smaller weight. Fill only holes SURROUNDED
+by measurement, so the smoothed stream interpolates between things that were
+observed rather than inventing surfaces that were not. That fills speckle in an
+otherwise-measured floor and refuses to invent a wall, which is the distinction
+that matters and the one this version cannot make.
+
+**One incidental finding worth keeping.** The 40-60% no-estimate rate that
+motivated this is not a steady state. It is what a *featureless surface* reads,
+and what the whole frame reads for a second after the camera swings somewhere
+new; once ARCore has parallax on a textured scene it falls to 0-10%. Any future
+claim about coverage should say which of those it is measuring.
 
 ### The confidence map: MEASURED
 

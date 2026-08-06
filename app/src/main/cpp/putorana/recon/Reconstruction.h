@@ -236,26 +236,69 @@ struct Config {
     /**
      * Fill pixels where RAW depth has no estimate with the smoothed stream.
      *
-     * ## This is not a reversal of the decision to use raw depth
+     * OFF, and it was built, measured on the device and turned off in one
+     * afternoon. The mechanism works exactly as designed; the design was wrong.
+     * Everything below is why, because the idea is a good one and someone will
+     * have it again.
      *
-     * The smoothed stream was rejected for integration and stays rejected: ARCore
+     * ## What it was for
+     *
+     * The smoothed stream is rejected for integration and stays rejected: ARCore
      * has already fused it temporally, so averaging it converges on the smoothing
      * rather than the surface, and its inpainted regions are a guess whose mean
      * over a hundred views is the same guess. That produced a flat floor
      * reconstructed as rounded lumps and planar slabs standing where nothing is.
      *
      * All of which is true wherever raw depth EXISTS. It says nothing about the
-     * 40% to 60% of pixels where raw reports zero, because there the alternative
-     * to a smoothed guess is not a better measurement, it is a hole, and no
-     * weighting scheme reaches a measurement that was never made. That gap is the
-     * largest remaining limit on coverage and it cannot be closed inside the
-     * integrator.
+     * pixels where raw reports zero, because there the alternative to a smoothed
+     * guess is a hole. Fill exactly those, at a low weight, and let real
+     * measurements overrule it wherever they arrive.
      *
-     * NEVER both for the same pixel. That restriction is the entire safety of
-     * this feature, and it is enforced in the conversion loop rather than
-     * described here.
+     * ## Why that argument does not survive contact with a wall
+     *
+     * The weight was supposed to arbitrate. The two sources never compete for one
+     * PIXEL, by construction, but they do compete for one VOXEL, since a patch
+     * that is featureless from one angle is textured from another. At 0.05 a
+     * confident raw sample outvotes twenty fills, so fill builds where nothing
+     * else can and is overruled where measurement eventually lands.
+     *
+     * That reasoning has a hole in it, and it is the case that matters. On a
+     * plainly painted wall raw depth returns nothing from ANY angle, because
+     * there is no texture to match from any angle. So no competing sample ever
+     * arrives, the weight arbitrates nothing, and the wall is built entirely from
+     * inpainting. Lowering holeFillWeight does not make it less wrong; it makes
+     * it arrive more slowly and be equally wrong on arrival.
+     *
+     * The holes and the danger are the same set of pixels. The design treated
+     * them as separable.
+     *
+     * ## Measured, on 2026-08-06, before turning it off
+     *
+     *   reached 100% of the holes, in nearly every window. It works.
+     *   up to 88% of everything fused was inpainted rather than measured, and one
+     *     frame reported 13921 of 13939 fused samples from fill: a reconstruction
+     *     built essentially entirely from a guess.
+     *   chunks held went from 81 to 150, remesh from 0.55 to 0.97 ms per chunk,
+     *     integration to 33 ms. Nearly double the memory, spent on invented
+     *     geometry, in an app that has twice died with the allocator out of
+     *     memory once the node count climbed.
+     *
+     * And the reconstruction looked worse where it mattered: the featureless
+     * walls that only fill could reach are the walls fill made ugly.
+     *
+     * ## What would actually work, for whoever picks this up
+     *
+     * Not a smaller weight. The shape has to change: fill only holes SURROUNDED
+     * by measurement, so the smoothed stream interpolates between things we
+     * observed instead of inventing surfaces we never saw. That fills speckle in
+     * an otherwise-measured floor and refuses to invent a wall, which is the
+     * distinction that matters and the one this version cannot make.
+     *
+     * The plumbing, the probes and the never-both-for-one-pixel restriction all
+     * stay, because they cost nothing while this is false and they are what any
+     * second attempt would need anyway.
      * */
-    bool holeFillEnabled = true;
+    bool holeFillEnabled = false;
 
     /**
      * The integration weight a filled sample gets, on the same scale as the
@@ -276,11 +319,16 @@ struct Config {
      * overruled everywhere a real measurement eventually arrives. That is the
      * whole intent.
      *
-     * Start low and raise carefully. The smoothed stream's error is SYSTEMATIC
-     * rather than noisy, so it does not average away with more views the way a
-     * bad raw sample does; too high here reintroduces the lumps and slabs
-     * directly. If the reconstruction comes back smooth but wrong, this is the
-     * number, not the truncation.
+     * ## And that argument is wrong where it counts, which is why fill is off
+     *
+     * It holds only where a real measurement can eventually arrive. On a
+     * featureless wall none ever does, from any angle, so nothing is arbitrated
+     * and the surface is inpainting whatever this number is. Lowering it delays
+     * the wrong wall rather than preventing it.
+     *
+     * Kept at 0.05 rather than tuned, because tuning it was never the lever. See
+     * holeFillEnabled for the measurement and for the shape a second attempt
+     * would need.
      * */
     float holeFillWeight = 0.05f;
 
