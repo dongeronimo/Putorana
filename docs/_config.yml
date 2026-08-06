@@ -1,0 +1,43 @@
+title: Putorana
+tagline: A dev diary
+description: >-
+  Building an AR space reconstruction on Android: ARCore depth in, a TSDF in the
+  middle, Vulkan out. Written down as it happens, including the parts that were
+  wrong.
+author: dongeronimo
+
+# Project pages are served from a subpath, so baseurl is not optional. Get it
+# wrong and every stylesheet, link and image 404s while the markdown still looks
+# fine locally.
+url: "https://dongeronimo.github.io"
+baseurl: "/Putorana"
+
+github_username: dongeronimo
+repository: dongeronimo/Putorana
+
+theme: minima
+show_excerpts: true
+
+plugins:
+  - jekyll-feed
+  - jekyll-seo-tag
+
+# Setting this REPLACES Jekyll's default exclude list rather than adding to it,
+# so the defaults are repeated here. Dropping them is how a Gemfile added later
+# for a local preview ends up served as a page.
+exclude:
+  - README.md
+  - Gemfile
+  - Gemfile.lock
+  - vendor/
+  - .sass-cache/
+  - .jekyll-cache/
+
+# Dated diary entries. The URL carries the date because that is what makes an
+# entry findable later: the question asked is usually "what did I do the week
+# the reconstruction started working", not "what was that post called".
+permalink: /:year/:month/:day/:title/
+
+kramdown:
+  input: GFM
+  syntax_highlighter: rouge

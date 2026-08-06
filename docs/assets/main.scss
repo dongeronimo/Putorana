@@ -1,0 +1,62 @@
+---
+# Empty front matter, and required: it is what tells Jekyll to run this file
+# through the SCSS converter instead of copying it out verbatim. Living at
+# assets/main.scss is what makes it override minima's file of the same name.
+---
+
+// Variables have to be set BEFORE the import, since minima's own partials read
+// them at their point of use. 800px is the default and it is tight for a page
+// that is mostly screenshots and a couple of wide tables.
+$content-width: 900px;
+
+@import "minima";
+
+// A diary of a renderer is mostly pictures of a renderer. Phone screenshots are
+// portrait and 1080 wide, so both dimensions need a ceiling: max-width alone
+// still lets a portrait shot take three screens of scrolling.
+figure {
+  margin: $spacing-unit 0;
+
+  img {
+    display: block;
+    max-width: 100%;
+    max-height: 80vh;
+    width: auto;
+    margin: 0 auto;
+    border: 1px solid $grey-color-light;
+    border-radius: 3px;
+  }
+}
+
+figcaption {
+  margin-top: $spacing-unit * 0.35;
+  text-align: center;
+  font-size: $small-font-size;
+  color: $grey-color;
+}
+
+// Any image not wrapped in a figure still has to fit.
+img {
+  max-width: 100%;
+  height: auto;
+}
+
+// Wide content scrolls inside itself. Log lines and the before/after tables are
+// both wider than the column on a phone, and a body that scrolls sideways makes
+// the whole page feel broken rather than the one element that is oversized.
+pre,
+.highlight {
+  overflow-x: auto;
+}
+
+table {
+  display: block;
+  overflow-x: auto;
+  width: 100%;
+}
+
+// Blockquotes carry documentation quotes here, not asides, so the italic that
+// minima applies to them is wrong: it is verbatim text from a header file.
+blockquote {
+  font-style: normal;
+}

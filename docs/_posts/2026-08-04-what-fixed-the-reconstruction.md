@@ -1,4 +1,8 @@
-# What Fixed the Reconstruction, and What Only Looked Like It Would
+---
+layout: post
+title: "What Fixed the Reconstruction, and What Only Looked Like It Would"
+date: 2026-08-04
+---
 
 A record of one day of work on `putorana::recon`, written down because most of it
 was wrong and the wrong parts are the expensive ones to rediscover.
@@ -8,18 +12,22 @@ that covers a floor, a bed, a fan and a doorway. Four things were changed to get
 there. Only one of them was the actual problem, and it was not any of the three
 that theory pointed at.
 
-The screenshots are the evidence. They are in this directory, timestamped, and
-each section names the one that belongs to it.
+The screenshots are the evidence. They are timestamped, they are all from the one
+device, and each section shows the one that belongs to it.
 
 ---
 
-# Where this starts
+## Where this starts
 
 The previous session ended with a working pipeline and a bad picture. Raw depth
 was being integrated, chunks were being meshed and drawn, and the result looked
 like this:
 
-![The state at the start: torn sheets, lumps, floating fragments](Untitled.png)
+<figure>
+  <img src="{{ site.baseurl }}/assets/2026-08-04/Untitled.png"
+       alt="A torn, lumpy reconstruction with floating fragments">
+  <figcaption>The state at the start: torn sheets, lumps, floating fragments</figcaption>
+</figure>
 
 Three complaints, in the words they were made in: the mesh has gaps between
 chunks, there is noise that never goes away, and distant things reconstruct
@@ -34,7 +42,7 @@ everything below moves one variable at a time.
 
 ---
 
-# The method
+## The method
 
 Stated up front because it is the part worth keeping.
 
@@ -56,9 +64,9 @@ left to reinterpret it favourably.
 
 ---
 
-# Round one: the confidence gate
+## Round one: the confidence gate
 
-## The reasoning
+### The reasoning
 
 Raw depth on ARCore is motion stereo. It matches image patches between successive
 frames and turns disparity into distance. That works wherever the picture has
@@ -77,7 +85,7 @@ direction had been applied. The smoothed stream was rejected for producing
 correlated errors; raw depth on a featureless wall produces correlated errors of
 its own.
 
-ARCore has the answer for this and we were not reading it. From
+ARCore has the answer for this, and it was not being read. From
 `arcore_c_api.h:5262`:
 
 > If an application requires filtering out low-confidence pixels, removing depth
@@ -88,7 +96,7 @@ ARCore has the answer for this and we were not reading it. From
 the depth map, 0 for no confidence and 255 for high. Raw depth without it is half
 of an API.
 
-## What was built
+### What was built
 
 `ar::DepthImage` gained `confidence` and `confidenceRowStrideBytes`. The
 acquisition sits next to the depth acquisition, is released next to it, and
@@ -111,7 +119,7 @@ them. Rare before the gate, ordinary after it (a dark room, a phone on a desk,
 the first seconds after a resume), so `Integrate` now returns early when nothing
 survived.
 
-## What happened
+### What happened
 
 FPS was solved outright. The frame loop went to a stable 30.0 fps, which is the
 camera rate, with integration at 11.8 ms instead of 114 ms and 62 voxel chunks
@@ -119,15 +127,19 @@ instead of 592.
 
 The picture got worse in a specific way:
 
-![Gate at 128: faithful and full of holes](Screenshot_20260804_101732.png)
+<figure>
+  <img src="{{ site.baseurl }}/assets/2026-08-04/Screenshot_20260804_101732.png"
+       alt="A reconstruction with accurate but sparse, hole-ridden surfaces">
+  <figcaption>Gate at 128: faithful and full of holes</figcaption>
+</figure>
 
-The user's verdict was that the meshes were much more faithful to the real world
-at the cost of holes and much less coverage, and that a floor came back as small
-disconnected patches rather than a continuous surface. "Isso não me serve."
+The meshes came back much more faithful to the real world, at the cost of holes
+and a lot less coverage. A floor arrived as small disconnected patches instead
+of a continuous surface, and a floor in pieces is no use at all.
 
 The log agreed. The gate at 128 was rejecting 79% of the samples in a frame.
 
-## Why lowering the threshold was the wrong response
+### Why lowering the threshold was the wrong response
 
 The obvious next move is 128 to 90, then 64, then 48. It does not work, and the
 reason is structural rather than numerical.
@@ -139,9 +151,9 @@ chosen. The instrument was wrong for the job.
 
 ---
 
-# Round two: weight instead of gate
+## Round two: weight instead of gate
 
-## The change
+### The change
 
 A TSDF fuses by weighted average. A poor sample does not have to be discarded; it
 can be admitted with a small weight, so it builds a continuous surface where
@@ -168,23 +180,35 @@ dropped from 128 to 32 and its job changed: it is now an outlier filter whose
 only remaining purpose is keeping absurd readings out of the frustum, which is
 the one thing a weight cannot do.
 
-## What happened
+### What happened
 
 Close range became very good:
 
-![Close range after weighting](Screenshot_20260804_102718.png)
+<figure>
+  <img src="{{ site.baseurl }}/assets/2026-08-04/Screenshot_20260804_102718.png"
+       alt="Nearby objects reconstructed with continuous surfaces">
+  <figcaption>Close range after weighting</figcaption>
+</figure>
 
 The floor did not:
 
-![The floor: covered at the left edge, absent across the middle](Screenshot_20260804_102750.png)
+<figure>
+  <img src="{{ site.baseurl }}/assets/2026-08-04/Screenshot_20260804_102750.png"
+       alt="A floor with mesh at the left edge and none in the middle">
+  <figcaption>The floor: covered at the left edge, absent across the middle</figcaption>
+</figure>
 
-![Ragged coverage with no obvious geometric pattern](Screenshot_20260804_102812.png)
+<figure>
+  <img src="{{ site.baseurl }}/assets/2026-08-04/Screenshot_20260804_102812.png"
+       alt="Patchy mesh coverage scattered across a tiled floor">
+  <figcaption>Ragged coverage with no obvious geometric pattern</figcaption>
+</figure>
 
-The user's description was that some areas capture well, others capture badly,
-and there was no way to tell why. That last part is the useful observation, and
-it deserved more attention than it got at the time.
+Some areas captured well, others captured badly, and there was no way to tell
+which would be which. That last part is the useful observation, and it deserved
+more attention than it got at the time.
 
-## Two explanations that were ruled out by looking
+### Two explanations that were ruled out by looking
 
 Distance was ruled out by the doorway screenshot. The nearest and most central
 floor tile has no mesh while the floor around the door, further away, is covered.
@@ -199,7 +223,7 @@ produced a hypothesis, and the hypothesis was wrong.
 
 ---
 
-# The measurement that killed the hypothesis
+## The measurement that killed the hypothesis
 
 The claim was that untextured surfaces produce no depth at all, not bad depth.
 Motion stereo with nothing to match returns zero, which becomes NaN, and no
@@ -235,7 +259,7 @@ a gate at 32 with the confident samples weighted near 1.
 
 ---
 
-# The bug that was actually there
+## The bug that was actually there
 
 With the hypothesis dead, the log got read again rather than the picture. This
 line had been printing for half an hour:
@@ -250,15 +274,19 @@ Pinned at 129 for over thirty seconds. The remesh budget is 8 chunks per frame a
 30 fps, which is 240 chunks per second. A backlog of 129 should clear in half a
 second. It never cleared.
 
-And the user had just reported something that fitted:
+And a picture taken a few minutes earlier fitted:
 
-![The plush ox, cut off along a clean line at a chunk boundary](Screenshot_20260804_111334.png)
+<figure>
+  <img src="{{ site.baseurl }}/assets/2026-08-04/Screenshot_20260804_111334.png"
+       alt="A meshed plush ox ending abruptly along a straight horizontal edge">
+  <figcaption>The plush ox, cut off along a clean line at a chunk boundary</figcaption>
+</figure>
 
 The mesh covers the region above and stops dead along a straight edge. Everything
 below that line is absent, as though the chunk containing it had never been
 generated.
 
-## The cause
+### The cause
 
 `Reconstruction::Remesh` walked Chisel's dirty set from `begin()` every frame,
 took the first `maxChunks` entries and erased them:
@@ -289,7 +317,7 @@ This accounts for all three symptoms at once:
   that never got its turn looks like.
 * No improvement over time, because the starving set is the same set every frame.
 
-## The fix
+### The fix
 
 A cycle. Take everything pending into a queue, drain the queue at the budget over
 as many frames as it takes, and refill only when it is empty. Chunks dirtied
@@ -302,14 +330,22 @@ would read as zero at the moment a full cycle has just been taken out of it.
 
 ---
 
-# Where it landed
+## Where it landed
 
 The backlog now moves. It drains to 8 and refills toward 116 instead of sitting
 at 129.
 
-![A fan meshed in the round, with the corner and wall closing around it](Screenshot_20260804_112807.png)
+<figure>
+  <img src="{{ site.baseurl }}/assets/2026-08-04/Screenshot_20260804_112807.png"
+       alt="A pedestal fan reconstructed from several angles">
+  <figcaption>A fan meshed in the round, with the corner and wall closing around it</figcaption>
+</figure>
 
-![Continuous surface across floor and wall](Screenshot_20260804_112726.png)
+<figure>
+  <img src="{{ site.baseurl }}/assets/2026-08-04/Screenshot_20260804_112726.png"
+       alt="An unbroken mesh running from the floor up the wall">
+  <figcaption>Continuous surface across floor and wall</figcaption>
+</figure>
 
 | | Start of day | End of day |
 |---|---|---|
@@ -327,7 +363,7 @@ The GPU was never the problem and still is not. It finishes a frame in 0.82 ms.
 
 ---
 
-# What is still wrong
+## What is still wrong
 
 Three kinds of artefact remain, with different causes, and they are worth telling
 apart before anyone tries to fix them together.
@@ -346,7 +382,7 @@ measurement pointing at it. The bimodal confidence distribution means a weight
 curve that separates the two modes should be worth more than any truncation
 tuning.
 
-## Space carving is broken, and it is a bug rather than a setting
+### Space carving is broken, and it is a bug rather than a setting
 
 `DistVoxel::Carve()` reads:
 
@@ -378,7 +414,7 @@ else if (enableVoxelCarving && surfaceDist > truncation + carvingDist)
 Only voxels whose SDF is already below `1e-5` are eligible. A voxel sitting just
 in front of a removed surface has a small positive SDF and never qualifies.
 
-## Truncation does not depend on distance
+### Truncation does not depend on distance
 
 `truncationQuadratic` and `truncationLinear` are both zero, so tau is a constant
 0.06 m at every range. ARCore documents its depth error as growing quadratically
@@ -389,7 +425,7 @@ been evaluated on its own.
 
 ---
 
-# What not to try again
+## What not to try again
 
 Written as a list because the cost of rediscovering any of these is a session.
 
@@ -414,7 +450,7 @@ Written as a list because the cost of rediscovering any of these is a session.
 
 ---
 
-# Why this matters for what comes next
+## Why this matters for what comes next
 
 The surface is now good enough that the remaining noise can be attacked **on the
 mesh** rather than in the field. Decimation or smoothing over chunk meshes is a
