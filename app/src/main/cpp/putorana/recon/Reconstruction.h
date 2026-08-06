@@ -302,10 +302,34 @@ struct Config {
      * entirely, and a surface re-lit or re-exposed catches up rather than staying
      * wrong forever.
      *
-     * This is also what InterpolateColor normalises the per-vertex confidence
-     * against, so a voxel at the ceiling reads exactly 1.0 in the shader.
+     * NOT what the per-vertex confidence is normalised against. See
+     * colorFullConfidenceWeight, and the reason those are two numbers.
      * */
     uint8_t colorMaxWeight = 32;
+
+    /**
+     * How many observations before a voxel's colour is trusted COMPLETELY by the
+     * renderer, on the same scale as colorMaxWeight above.
+     *
+     * ## Why this is not colorMaxWeight, which is what it was at first
+     *
+     * The two look like the same number and are not. colorMaxWeight is about the
+     * quality of the running average and wants to be large: at 32, fresh evidence
+     * is always worth 1/33, so a surface that gets re-exposed or re-lit can still
+     * be corrected. This one is about whether there is a colour to show at all,
+     * and that is true from the first observation.
+     *
+     * Wiring the confidence to the ceiling meant a freshly meshed vertex reported
+     * 1/32 and the shader drew it 97% flat blue, staying that way for a full
+     * second of continuous viewing. On the device that was a blue fringe crawling
+     * along the leading edge of every sweep and a blue cast over anything recently
+     * meshed, which reads as a colour bug rather than as the fade-in it is.
+     *
+     * 4 is about an eighth of a second at 30 fps. Low enough that colour appears
+     * as soon as the geometry does, high enough that a single stray sample cannot
+     * put a fully saturated wrong colour on a surface on its own.
+     * */
+    uint8_t colorFullConfidenceWeight = 4;
 };
 
 class Reconstruction {

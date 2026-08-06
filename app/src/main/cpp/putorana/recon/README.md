@@ -1035,6 +1035,16 @@ consecutive frames of one sweep with auto-exposure still settling. The ceiling
 here is 32, so one observation is always worth 1/33 and a surface that is re-lit
 or better exposed catches up.
 
+**The renderer's confidence is a different number, and that took a device to
+notice.** The obvious wiring is to normalise the per-vertex confidence by that
+same ceiling of 32, and it is wrong: the ceiling is about the quality of the
+average, while the confidence answers "is there a colour here at all", which is
+true from the first observation. Wired to 32, a freshly meshed vertex reported
+1/32 and the shader drew it 97% flat fallback colour, holding that for a full
+second of continuous viewing. On the device that was a blue fringe crawling along
+the leading edge of every sweep, and it reads as a colour bug rather than as the
+fade-in it is. `colorFullConfidenceWeight` is 4.
+
 **A carved voxel loses its colour.** `DistVoxel::Carve` resets the distance voxel
 and knows nothing about the `ColorVoxel` sharing its index; without an explicit
 reset the colour of whatever used to be there survives its own geometry.

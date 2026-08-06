@@ -315,7 +315,13 @@ the voxel is inside the truncation band and already projected it.
     coverage lags geometry coverage.
   * **`Mesh` gains `colorWeights`**, one float per vertex. `colors` alone cannot
     distinguish a black surface from a voxel never seen in colour, and the
-    renderer needs that to know whether to trust the colour or fall back.
+    renderer needs that to know whether to trust the colour or fall back. It
+    saturates at `SetColorFullConfidenceWeight`, which is deliberately **not** the
+    integrator's ceiling: the ceiling is about keeping the average correctable and
+    wants to be large, while this asks whether there is a colour to show and is
+    satisfied by a handful of samples. Wiring them together made every newly
+    meshed triangle draw as flat fallback colour for a second, which on the device
+    was a blue fringe crawling along the leading edge of each sweep.
 
 ## Verified
 
@@ -329,14 +335,27 @@ It has since been run. The library reconstructs a room on a Samsung SM-S731B at
 30 fps with integration taking 19 ms for 111 chunks in view, and the dedup ratio
 above is a device measurement rather than a prediction.
 
-**Change 7, colour, is not in that measurement.** It compiles clean on the same
-target and has not yet been run on a device, so every number in it is reasoning
-rather than observation. Three things are worth confirming before believing it,
-and each has a `RECONPROBE` line waiting to answer it: whether the two scales of
-the depth-to-colour affine map really come out equal, what `ColorizeMesh` costs
-per remesh now that it does eight chunk lookups per vertex on top of the six
-`ComputeNormalsFromGradients` already did, and whether the fused colour matches
-the camera feed drawn immediately behind it.
+**Change 7, colour, has also been run**, on the same device.
+
+The depth-to-colour affine map comes out at scale `(4.000, 4.000)` with offset
+`(0.0, 60.0)`. The equal scales were the test; the offset is the stronger result,
+because 60 is exactly the `cropTop` that `ar::Subsystem` derives from the two
+aspect ratios, by a completely separate calculation that never touches a focal
+length. Two independent derivations landing on the same crop is what confirms the
+model rather than the arithmetic.
+
+Meshing measured **0.18 ms per chunk** including `ColorizeMesh`, against a remesh
+budget of 8 chunks a frame, so 1.4 ms against integration's 20. Colour did not
+show up in integration at all: it rose from 18 to 23 ms over a session in which
+the furthest accepted sample went from 2.25 m to 2.93 m, and frustum volume grows
+with the cube of that, so the cost rose by less than the volume alone predicts.
+
+**One caveat on the meshing number, which is not yet retired.** It was taken over
+chunks averaging 45 vertices, early in a scan. `GenerateMesh` sweeps a fixed 4096
+voxels per chunk while `ColorizeMesh` and `ComputeNormalsFromGradients` are
+proportional to the vertex count, so the part colour added was a tenth of what it
+will be on a chunk holding 450. The `RECONPROBE remesh` line is there to be read
+again on a full room.
 
 ## This library is always built optimised
 

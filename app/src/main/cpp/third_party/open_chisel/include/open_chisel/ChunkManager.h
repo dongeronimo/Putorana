@@ -179,11 +179,36 @@ namespace chisel
             Vec3 InterpolateColor(const Vec3& colorPos, float* weightOut);
 
             /**
-             * LOCAL ADDITION: what InterpolateColor divides the accumulated
-             * ColorVoxel weight by to normalise it. Set to whatever ceiling the
-             * integrator was given, or the weights come back clipped at 1/255.
+             * LOCAL ADDITION: the accumulated ColorVoxel weight at which
+             * InterpolateColor reports a confidence of 1.0. Anything above it
+             * clamps.
+             *
+             * ## Not the integrator's ceiling, and conflating them was a mistake
+             *
+             * The obvious wiring is to divide by whatever ceiling the integrator
+             * accumulates to, and it is wrong, because the two numbers answer
+             * different questions.
+             *
+             * The integrator's ceiling exists so the running average stays
+             * CORRECTABLE: at 32, a fresh observation is always worth 1/33 of the
+             * result, so a surface that gets re-lit or better exposed catches up
+             * instead of staying wrong forever. That is about the quality of the
+             * average, and it wants to be large.
+             *
+             * This one answers "is there a colour here at all", which is what the
+             * renderer needs in order to choose between the fused colour and a
+             * flat fallback. That is true from the FIRST observation. Dividing by
+             * 32 made every newly meshed triangle 97% fallback colour and left it
+             * that way for a second of continuous viewing, which on the device
+             * read as a flat blue fringe crawling along the leading edge of every
+             * sweep -- easily mistaken for a colour bug, and it is not one.
+             *
+             * Small on purpose. A handful of observations is already a colour.
              * */
-            inline void SetColorMaxWeight(uint8_t value) { colorMaxWeight = value; }
+            inline void SetColorFullConfidenceWeight(uint8_t value)
+            {
+                colorFullConfidenceWeight = value;
+            }
 
             void CacheCentroids();
             void ExtractBorderVoxelMesh(const ChunkPtr& chunk, const Eigen::Vector3i& index, const Eigen::Vector3f& coordinates, std::unordered_map<uint64_t, VertIndex>* edgeVertices, VertIndex* nextMeshIndex, Mesh* mesh);
@@ -224,8 +249,8 @@ namespace chisel
             MeshMap allMeshes;
             bool useColor;
 
-            /** LOCAL ADDITION: see SetColorMaxWeight. 0 means normalise by 255. */
-            uint8_t colorMaxWeight = 0;
+            /** LOCAL ADDITION: see SetColorFullConfidenceWeight. 0 means 255. */
+            uint8_t colorFullConfidenceWeight = 0;
     };
 
     typedef std::shared_ptr<ChunkManager> ChunkManagerPtr;

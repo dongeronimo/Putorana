@@ -321,11 +321,12 @@ std::unique_ptr<Reconstruction> Reconstruction::Create(const Config& config, std
     impl.integrator.SetMaxWeight(config.maxWeight);
     impl.integrator.SetColorMinWeight(config.colorMinWeight);
     impl.integrator.SetColorMaxWeight(config.colorMaxWeight);
-    // The same ceiling on both sides, and it has to be: the integrator caps the
-    // weight it accumulates, and the mesher divides by it to normalise the
-    // per-vertex confidence. Two different numbers would put a surface at its
-    // ceiling somewhere other than 1.0 in the shader.
-    impl.chisel->GetMutableChunkManager().SetColorMaxWeight(config.colorMaxWeight);
+    // Deliberately NOT colorMaxWeight, which is what this was at first and which
+    // made every newly meshed triangle draw as flat fallback colour for a second.
+    // The integrator's ceiling is about keeping the average correctable; this is
+    // about whether there is a colour worth showing, which is true far sooner.
+    impl.chisel->GetMutableChunkManager().SetColorFullConfidenceWeight(
+            config.colorFullConfidenceWeight);
 
     impl.camera.SetNearPlane(config.nearPlane);
     impl.camera.SetFarPlane(config.farPlane);
@@ -336,7 +337,8 @@ std::unique_ptr<Reconstruction> Reconstruction::Create(const Config& config, std
                         "carving %s (decay %.2f per observation, floor %.2f), max weight %.0f, "
                         "depth [%.2f, %.2f] m, confidence gate %u/255 then weight "
                         "%.2f..1.00 to the power %.1f, colour %s (min weight %.2f, "
-                        "max weight %u, so one observation is worth 1/%u)",
+                        "max weight %u so one observation is worth 1/%u, fully trusted "
+                        "by the renderer at %u observations)",
                         config.chunkVoxels, config.voxelMetres,
                         config.chunkVoxels * config.voxelMetres, config.truncationQuadratic,
                         config.truncationLinear, config.truncationConstant, config.truncationScale,
@@ -346,7 +348,8 @@ std::unique_ptr<Reconstruction> Reconstruction::Create(const Config& config, std
                         config.confidenceWeightFloor, config.confidenceWeightExponent,
                         config.colorEnabled ? "on" : "off", config.colorMinWeight,
                         static_cast<unsigned>(config.colorMaxWeight),
-                        static_cast<unsigned>(config.colorMaxWeight) + 1u);
+                        static_cast<unsigned>(config.colorMaxWeight) + 1u,
+                        static_cast<unsigned>(config.colorFullConfidenceWeight));
     return reconstruction;
 }
 

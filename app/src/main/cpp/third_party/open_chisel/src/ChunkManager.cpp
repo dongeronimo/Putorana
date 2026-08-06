@@ -28,6 +28,7 @@
 #include <open_chisel/geometry/Raycast.h>
 #include <open_chisel/ProjectionIntegrator.h>
 #include <open_chisel/truncation/Truncator.h>
+#include <algorithm>
 #include <iostream>
 
 namespace chisel
@@ -552,11 +553,12 @@ namespace chisel
         const ColorVoxel* v_010 = GetColorVoxel(centre(x_0, y_1, z_0));
         const ColorVoxel* v_101 = GetColorVoxel(centre(x_1, y_0, z_1));
 
-        // Weights normalise against the ceiling the integrator was given, so a
-        // voxel at its ceiling reads exactly 1.0. Falling back to 255 keeps this
-        // meaningful when no ceiling was set, which is upstream's unbounded mean.
+        // Confidence saturates at a handful of observations rather than at the
+        // integrator's ceiling, and the two being different numbers is the whole
+        // point. See SetColorFullConfidenceWeight.
         const float weightScale =
-                1.0f / static_cast<float>(colorMaxWeight > 0 ? colorMaxWeight : 255);
+                1.0f / static_cast<float>(colorFullConfidenceWeight > 0 ? colorFullConfidenceWeight
+                                                                        : 255);
 
         if(!v_000 || !v_001 || !v_011 || !v_111 || !v_110 || !v_100 || !v_010 || !v_101)
         {
@@ -570,7 +572,10 @@ namespace chisel
                 if (weightOut) *weightOut = 0.0f;
                 return Vec3(0, 0, 0);
             }
-            if (weightOut) *weightOut = static_cast<float>(nearest->GetWeight()) * weightScale;
+            if (weightOut)
+            {
+                *weightOut = std::min(static_cast<float>(nearest->GetWeight()) * weightScale, 1.0f);
+            }
             return Vec3(static_cast<float>(nearest->GetRed()) / 255.0f,
                         static_cast<float>(nearest->GetGreen()) / 255.0f,
                         static_cast<float>(nearest->GetBlue()) / 255.0f);
@@ -635,7 +640,11 @@ namespace chisel
         // weight rather than a normalisation factor. A fade here is what makes
         // the boundary of a coloured region a gradient in the shader instead of
         // a hard edge.
-        if (weightOut) *weightOut = totalWeight * weightScale;
+        //
+        // Clamped, because the integrator accumulates well past the weight at
+        // which this saturates. Mesh::colorWeights documents itself as [0, 1] and
+        // this is the only place that could break it.
+        if (weightOut) *weightOut = std::min(totalWeight * weightScale, 1.0f);
 
         const float normalise = 1.0f / (totalWeight * 255.0f);
         return Vec3(red * normalise, green * normalise, blue * normalise);
