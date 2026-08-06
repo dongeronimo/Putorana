@@ -6,17 +6,34 @@ import androidx.appcompat.app.AppCompatActivity
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.util.Log
+import android.view.ViewGroup
+import androidx.activity.OnBackPressedCallback
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
+import androidx.core.view.updateLayoutParams
 import androidx.core.view.updatePadding
 import dev.dongeronimo.arreconstructor.databinding.ActivityMainBinding
 
 class MainActivity : AppCompatActivity() {
 
     private lateinit var binding: ActivityMainBinding
+
+    private lateinit var worldMenu: WorldMenu
+
+    /**
+     * Back closes the menu rather than leaving the app, but only while the menu
+     * is open, hence the arming from WorldMenu's open callback. Disabled by
+     * default, so a back press before the menu is ever used behaves normally.
+     */
+    private val closeMenuOnBack = object : OnBackPressedCallback(false) {
+        override fun handleOnBackPressed() {
+            worldMenu.close()
+        }
+    }
 
     /** True once NativeAr.create has succeeded. Nothing else may be called before it. */
     private var arCreated = false
@@ -53,16 +70,8 @@ class MainActivity : AppCompatActivity() {
 
         goFullscreen()
 
-        // The debug overlay is the only thing that cares about insets. The
-        // surface underneath is meant to be full bleed, cutout included, so it
-        // deliberately gets no inset handling at all.
-        ViewCompat.setOnApplyWindowInsetsListener(binding.sampleText) { view, insets ->
-            val safe = insets.getInsets(
-                WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout()
-            )
-            view.updatePadding(left = safe.left, top = safe.top, right = safe.right)
-            insets
-        }
+        setUpWorldMenu()
+        applyOverlayInsets()
 
         // The instance was already created by JNI_OnLoad, when the companion
         // object below loaded the library. This only reads back the outcome.
@@ -75,6 +84,70 @@ class MainActivity : AppCompatActivity() {
             startAr()
         } else {
             requestCamera.launch(Manifest.permission.CAMERA)
+        }
+    }
+
+    /**
+     * Wires the hamburger to the world list.
+     *
+     * The activity does not switch the world itself: it hands the choice to the
+     * surface view, which owns the render thread the renderer has to be spoken
+     * to on. What comes back is nothing — the switch is fire and forget, and
+     * whether it worked is a question for logcat, not for the UI.
+     *
+     * The menu opens with the first entry ticked and the renderer starts on the
+     * matching world, so nothing has to be sent to make the initial state true.
+     */
+    private fun setUpWorldMenu() {
+        worldMenu = WorldMenu(
+            button = binding.menuButton,
+            scrim = binding.menuScrim,
+            panel = binding.worldMenu,
+            onOpenChanged = { open -> closeMenuOnBack.isEnabled = open },
+        ) { world ->
+            Log.i(TAG, "world selected: $world")
+            binding.vulkanSurface.setWorld(world)
+        }
+        onBackPressedDispatcher.addCallback(this, closeMenuOnBack)
+    }
+
+    /**
+     * Keeps the overlays clear of a notch or punch-hole.
+     *
+     * Only the overlays. The surface underneath is meant to be full bleed,
+     * cutout included, so it deliberately gets no inset handling at all. Nor do
+     * the system bars need any: they are hidden, and come back only as a
+     * transient overlay that draws over everything anyway.
+     *
+     * The button takes it as margins rather than padding: padding on an
+     * ImageButton moves the icon inside its background, which would leave the
+     * translucent rectangle sitting under the notch with the hamburger pushed
+     * off centre. Everything below it is constrained to the button, so shifting
+     * the button carries the report and the panel along with it.
+     */
+    private fun applyOverlayInsets() {
+        val margin = resources.getDimensionPixelSize(R.dimen.overlay_margin)
+
+        ViewCompat.setOnApplyWindowInsetsListener(binding.menuButton) { view, insets ->
+            val safe = insets.getInsets(
+                WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout()
+            )
+            // Absolute, not additive: this runs again on every rotation, and
+            // adding to the current value would accumulate.
+            view.updateLayoutParams<ViewGroup.MarginLayoutParams> {
+                marginStart = margin + safe.left
+                topMargin = margin + safe.top
+            }
+            insets
+        }
+
+        // Top comes from the button above it; only the sides are left.
+        ViewCompat.setOnApplyWindowInsetsListener(binding.sampleText) { view, insets ->
+            val safe = insets.getInsets(
+                WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout()
+            )
+            view.updatePadding(left = safe.left, right = safe.right)
+            insets
         }
     }
 
@@ -198,6 +271,8 @@ class MainActivity : AppCompatActivity() {
     external fun runVulkanSelfTest(): NativeSelfTestResult
 
     companion object {
+        private const val TAG = "ARReconstructor"
+
         /** Four times a second: faster than the smoothing settles, slower than an eye reads. */
         private const val TIMINGS_INTERVAL_MS = 250L
 

@@ -20,9 +20,12 @@ namespace putorana::behaviours {
     private:
         //Start should run only once. This flags controls that.
         bool _alreadyStarted = false;
-        //ptr to the owning node. BaseBehaviour must not try to delete this.
-        putorana::graphics::Node* owner = nullptr;
     protected:
+        //ptr to the owning node. BaseBehaviour must not try to delete this.
+        //Protected and not private: the node is how a behaviour reaches anything
+        //at all, so a subclass that cannot see it cannot do its job. It is not
+        //public because it is the subclass's own link, not something callers set.
+        putorana::graphics::Node* owner = nullptr;
         std::optional<std::function<void(float, BaseBehaviour*)>> lateUpdate;
     public:
         // The behavour must know it's owning node.

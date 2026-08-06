@@ -1,4 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!-- Declaration order here IS the z order, and every overlay below depends on
+     it. A SurfaceView punches a transparent hole in the window and its own layer
+     is composited *behind* it, so anything declared after it still draws on top:
+     no setZOrderOnTop, no extra window, no elevation. Those exist for putting a
+     SurfaceView above other views, which is the opposite problem. -->
 <androidx.constraintlayout.widget.ConstraintLayout xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto"
     xmlns:tools="http://schemas.android.com/tools"
@@ -6,9 +11,7 @@
     android:layout_height="match_parent"
     tools:context=".MainActivity">
 
-    <!-- Fills the screen. A SurfaceView punches a transparent hole in the
-         window and its own layer is composited *behind* it, so anything
-         declared after it here (the report below) still draws on top. -->
+    <!-- Fills the screen. -->
     <dev.dongeronimo.arreconstructor.VulkanSurfaceView
         android:id="@+id/vulkan_surface"
         android:layout_width="0dp"
@@ -20,35 +23,32 @@
 
     <!-- Debug overlay: the VkInstance report from JNI_OnLoad. White with a
          black shadow so it stays readable over an empty (black) surface and
-         over whatever ends up being rendered later. -->
+         over whatever ends up being rendered later. Sits under the menu button
+         rather than beside it, so a long report cannot run into the button. -->
     <TextView
         android:id="@+id/sample_text"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:layout_margin="12dp"
+        android:layout_marginStart="@dimen/overlay_margin"
+        android:layout_marginTop="4dp"
+        android:layout_marginEnd="@dimen/overlay_margin"
         android:fontFamily="monospace"
         android:shadowColor="#FF000000"
         android:shadowRadius="4"
         android:textColor="#FFFFFFFF"
         android:textSize="12sp"
         app:layout_constraintStart_toStartOf="parent"
-        app:layout_constraintTop_toTopOf="parent"
+        app:layout_constraintTop_toBottomOf="@+id/menu_button"
         tools:text="VkInstance OK" />
 
-    <!-- GPU timings, top right. Declared AFTER the surface view for the same
-         reason the report above is: the surface composites behind the window,
-         so declaration order here is the z order, and last means on top. No
-         setZOrderOnTop, no extra window, no elevation — those exist for putting
-         a SurfaceView above other views, which is the opposite problem.
-
-         A background rather than just a shadow, because unlike a one line report
-         this is a block of numbers over a live camera image, and a shadow alone
-         does not survive a busy scene. -->
+    <!-- GPU timings, top right. A background rather than just a shadow, because
+         unlike a one line report this is a block of numbers over a live camera
+         image, and a shadow alone does not survive a busy scene. -->
     <TextView
         android:id="@+id/gpu_timings"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:layout_margin="12dp"
+        android:layout_margin="@dimen/overlay_margin"
         android:background="#99000000"
         android:fontFamily="monospace"
         android:paddingStart="8dp"
@@ -60,5 +60,65 @@
         app:layout_constraintEnd_toEndOf="parent"
         app:layout_constraintTop_toTopOf="parent"
         tools:text="frame  4.21 ms\nmesh   1.02 ms" />
+
+    <!-- What makes "tap outside to close" work. Covers the screen while the menu
+         is open and swallows the tap; declared before the button and the panel,
+         so it is under both and their own taps reach them first.
+
+         Transparent, not dimmed: what is behind it is the camera image, and the
+         point of the app is looking at that. -->
+    <View
+        android:id="@+id/menu_scrim"
+        android:layout_width="0dp"
+        android:layout_height="0dp"
+        android:clickable="true"
+        android:focusable="true"
+        android:visibility="gone"
+        app:layout_constraintBottom_toBottomOf="parent"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toTopOf="parent"
+        tools:visibility="gone" />
+
+    <!-- The margins are overwritten at runtime with the display cutout added on
+         top of them; see MainActivity. They are here so the preview and the
+         first frame are not wrong. -->
+    <ImageButton
+        android:id="@+id/menu_button"
+        android:layout_width="44dp"
+        android:layout_height="44dp"
+        android:layout_marginStart="@dimen/overlay_margin"
+        android:layout_marginTop="@dimen/overlay_margin"
+        android:background="@drawable/bg_overlay_button"
+        android:contentDescription="@string/world_menu"
+        android:scaleType="center"
+        android:src="@drawable/ic_menu"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toTopOf="parent" />
+
+    <!-- Empty in the layout: the rows are inflated from the WorldId enum, so a
+         new world is one entry there and nothing here.
+
+         constrainedHeight plus the bottom constraint keep a long list inside the
+         screen instead of letting it grow off the bottom edge. -->
+    <LinearLayout
+        android:id="@+id/world_menu"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="6dp"
+        android:layout_marginBottom="@dimen/overlay_margin"
+        android:background="@drawable/bg_overlay_panel"
+        android:clipToOutline="true"
+        android:minWidth="200dp"
+        android:orientation="vertical"
+        android:paddingTop="6dp"
+        android:paddingBottom="6dp"
+        android:visibility="gone"
+        app:layout_constrainedHeight="true"
+        app:layout_constraintBottom_toBottomOf="parent"
+        app:layout_constraintStart_toStartOf="@+id/menu_button"
+        app:layout_constraintTop_toBottomOf="@+id/menu_button"
+        app:layout_constraintVertical_bias="0"
+        tools:visibility="visible" />
 
 </androidx.constraintlayout.widget.ConstraintLayout>

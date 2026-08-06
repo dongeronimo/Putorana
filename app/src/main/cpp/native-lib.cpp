@@ -10,6 +10,7 @@
 #include "putorana/graphics/Device.h"
 #include "putorana/graphics/Frame.h"
 #include "putorana/graphics/Instance.h"
+#include "putorana/worlds/WorldRegistry.h"
 #include "vulkan_check.h"
 
 namespace {
@@ -117,6 +118,17 @@ Java_dev_dongeronimo_arreconstructor_NativeRenderer_drawFrame(
         jobject /* this */,
         jlong frameTimeNanos) {
     putorana::graphics::DrawFrame(frameTimeNanos);
+}
+
+// Switches the scene. Only records the request: the world is torn down and the
+// new one built by the next frame, which is the only moment there is a swapchain
+// to build its pipelines against. See WorldRegistry.h.
+extern "C" JNIEXPORT void JNICALL
+Java_dev_dongeronimo_arreconstructor_NativeRenderer_setWorld(
+        JNIEnv* /* env */,
+        jobject /* this */,
+        jint worldId) {
+    putorana::worlds::Request(worldId);
 }
 
 // --- NativeProfiler ---------------------------------------------------------

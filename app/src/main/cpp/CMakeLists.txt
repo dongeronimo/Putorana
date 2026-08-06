@@ -122,6 +122,7 @@ add_library(${CMAKE_PROJECT_NAME} SHARED
         putorana/Assets.cpp
         putorana/ar/Subsystem.cpp
         putorana/behavours/BaseBehaviour.cpp
+        putorana/behavours/RotationBehaviour.cpp
         putorana/graphics/Allocator.cpp
         putorana/graphics/Buffer.cpp
         putorana/graphics/ArCamera.cpp
@@ -136,7 +137,6 @@ add_library(${CMAKE_PROJECT_NAME} SHARED
         putorana/graphics/FrameRing.cpp
         putorana/graphics/GltfLoader.cpp
         putorana/graphics/GpuProfiler.cpp
-        putorana/graphics/HelloWorld.cpp
         putorana/graphics/Image.cpp
         putorana/graphics/Instance.cpp
         putorana/graphics/Light.cpp
@@ -150,6 +150,9 @@ add_library(${CMAKE_PROJECT_NAME} SHARED
         putorana/graphics/ShaderModule.cpp
         putorana/graphics/Swapchain.cpp
         putorana/graphics/World.cpp
+        putorana/worlds/WorldRegistry.cpp
+        putorana/worlds/helloWorld/HelloWorld.cpp
+        putorana/worlds/openChiselWorld/OpenChiselWorld.cpp
         # volk's implementation unit: dlopen's libvulkan.so and defines the
         # global vk* function pointers that every other TU here resolves against.
         third_party/volk/volk.c

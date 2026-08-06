@@ -1,10 +1,9 @@
-#include "HelloWorld.h"
+#include "OpenChiselWorld.h"
 
-#include "ChunkMaterial.h"
-#include "Device.h"
-#include "FrameRing.h"
-#include "Swapchain.h"
-
+#include "graphics/ChunkMaterial.h"
+#include "graphics/Device.h"
+#include "graphics/FrameRing.h"
+#include "graphics/Swapchain.h"
 
 #include <algorithm>
 
@@ -12,7 +11,9 @@
 
 #include <utility>
 
-namespace putorana::graphics {
+using namespace putorana::graphics;
+
+namespace putorana::worlds::openChisel {
 
 namespace {
 
@@ -64,12 +65,12 @@ constexpr uint32_t kChunkIndexCapacity = kChunkVertexCapacity * 5;
 
 } // namespace
 
-bool HelloWorld::CreateRenderPasses(const Swapchain& swapchain, std::string& error) {
+bool OpenChiselWorld::CreateRenderPasses(const Swapchain& swapchain, std::string& error) {
     // The mesh pass draws into its OWN target, in the swapchain's format so the
     // composite is a straight copy. The day tone mapping matters this becomes a
     // float format and only the final pass has to know.
-    meshPass_ = MeshPass::Create(device(), swapchain.format(), error);
-    if (meshPass_ == nullptr) {
+    meshPass = MeshPass::Create(device(), swapchain.format(), error);
+    if (meshPass == nullptr) {
         return false;
     }
 
@@ -78,17 +79,17 @@ bool HelloWorld::CreateRenderPasses(const Swapchain& swapchain, std::string& err
     // still leaves the reconstruction drawn on the clear colour, which is worth
     // having. So the error is logged and swallowed here rather than returned.
     std::string cameraError;
-    cameraFeed_ = CameraFeed::Create(device(), cameraError);
-    if (cameraFeed_ == nullptr) {
+    cameraFeed = CameraFeed::Create(device(), cameraError);
+    if (cameraFeed == nullptr) {
         __android_log_print(ANDROID_LOG_ERROR, kLogTag, "no camera background: %s",
                             cameraError.c_str());
     }
 
-    finalPass_ = FinalPass::Create(device(), swapchain.format(), error);
-    return finalPass_ != nullptr;
+    finalPass = FinalPass::Create(device(), swapchain.format(), error);
+    return finalPass != nullptr;
 }
 
-bool HelloWorld::CreateWorld(std::string& error) {
+bool OpenChiselWorld::CreateWorld(std::string& error) {
     // No cube any more.
     //
     // It was scaffolding and it did its job twice: first as the thing that
@@ -102,7 +103,7 @@ bool HelloWorld::CreateWorld(std::string& error) {
     // The camera is the only node this world builds. Everything else in the
     // scene arrives from the reconstruction, one node per chunk.
     Node* eye = root().AddChild(Node::Create("camera"));
-    cameraNode_ = eye;
+    cameraNode = eye;
 
     // Which KIND of camera is the one decision this world makes about AR. With a
     // session, ARCore owns both the projection and the pose, and the node's
@@ -111,15 +112,16 @@ bool HelloWorld::CreateWorld(std::string& error) {
         // The reconstruction, and the material its chunks are drawn with.
         //
         // reconstruction_holder, not a member: this world dies with the Device
-        // every time the app is backgrounded, and the reconstruction must not.
-        // Create is a no-op when one already exists, which is exactly what
-        // coming back from background looks like.
-        auto chunkMaterial = ChunkMaterial::Create(
+        // every time the app is backgrounded and again on every switch to
+        // another world, and the reconstruction must survive both. Create is a
+        // no-op when one already exists, which is exactly what coming back looks
+        // like either way.
+        auto material = ChunkMaterial::Create(
                 device(), glm::vec4(0.45f, 0.72f, 0.95f, 1.0f), error);
-        if (chunkMaterial == nullptr) {
+        if (material == nullptr) {
             return false;
         }
-        chunkMaterial_ = AddMaterial(kChunkMaterialName, std::move(chunkMaterial));
+        chunkMaterial = AddMaterial(kChunkMaterialName, std::move(material));
 
         recon::Config reconConfig;
         if (recon::reconstruction_holder::Create(reconConfig, error) == nullptr) {
@@ -127,8 +129,9 @@ bool HelloWorld::CreateWorld(std::string& error) {
         } else if (recon::Reconstruction* reconstruction =
                            recon::reconstruction_holder::Get()) {
             // Everything it already has, as if it had just changed. On a first
-            // run this is empty; after a trip to background it is the whole map,
-            // because every node holding it was destroyed with the Device.
+            // run this is empty; after a trip to background or a round trip
+            // through another world it is the whole map, because every node
+            // holding it was destroyed with this world.
             reconstruction->MarkAllDirty();
         }
 
@@ -137,15 +140,16 @@ bool HelloWorld::CreateWorld(std::string& error) {
         // needs the clip planes. Setting them on the camera alone would change
         // nothing at all.
         subsystem->SetClipPlanes(camera->nearPlane, camera->farPlane);
-        arCamera_ = camera.get();
+        arCamera = camera.get();
         eye->camera = std::move(camera);
         __android_log_print(ANDROID_LOG_INFO, kLogTag,
-                            "HelloWorld ready: AR camera, reconstruction on");
+                            "OpenChiselWorld ready: AR camera, reconstruction on");
     } else {
         // No ARCore means no depth, so nothing will ever be reconstructed and
         // this scene stays empty — the camera feed is gone too, so the screen is
-        // the clear colour and nothing else. That is now the honest picture of
-        // what this app can do on such a device, where before it was a cube.
+        // the clear colour and nothing else. That is the honest picture of what
+        // this world can do on such a device; the hello world is the one with
+        // something to look at there.
         eye->camera = PerspectiveCamera::Create();
         eye->position = glm::vec3(2.0f, 3.0f, 5.0f);
         // LookAt reads the node's world matrix, and it is fresh here because
@@ -153,24 +157,24 @@ bool HelloWorld::CreateWorld(std::string& error) {
         // cache — which has not been filled yet, since no frame has run.
         eye->LookAt(glm::vec3(0.0f, 0.0f, 0.0f));
         __android_log_print(ANDROID_LOG_WARN, kLogTag,
-                            "HelloWorld ready: no ARCore, so nothing to reconstruct and nothing "
-                            "to draw");
+                            "OpenChiselWorld ready: no ARCore, so nothing to reconstruct and "
+                            "nothing to draw");
     }
     return true;
 }
 
-void HelloWorld::Update(float deltaSeconds) {
+void OpenChiselWorld::Update(float deltaSeconds) {
     // The AR camera first, because everything else this frame is measured
     // against where the device is. Frame.cpp already ticked the session before
     // calling this, so the frame here is the current one.
     //
     // Under the lock, for the same reason the upload is: Pause arrives on the UI
     // thread and can invalidate the frame mid-read.
-    if (arCamera_ != nullptr && cameraNode_ != nullptr) {
+    if (arCamera != nullptr && cameraNode != nullptr) {
         if (const ar::Subsystem* subsystem = ar::subsystem_holder::Get()) {
             const ar::Subsystem::FrameGuard guard = subsystem->AcquireFrame();
             if (const ar::CameraFrame* arFrame = guard.get()) {
-                arCamera_->SetFrame(*arFrame, *cameraNode_);
+                arCamera->SetFrame(*arFrame, *cameraNode);
 
                 // Under the same guard, and it has to be: the depth pointer
                 // belongs to an ArImage the next Update releases, and the pose
@@ -187,19 +191,19 @@ void HelloWorld::Update(float deltaSeconds) {
     World::Update(deltaSeconds);
 }
 
-void HelloWorld::UpdateReconstruction(const ar::CameraFrame& frame) {
+void OpenChiselWorld::UpdateReconstruction(const ar::CameraFrame& frame) {
     recon::Reconstruction* reconstruction = recon::reconstruction_holder::Get();
-    if (reconstruction == nullptr || chunkMaterial_ == nullptr || !frame.tracking) {
+    if (reconstruction == nullptr || chunkMaterial == nullptr || !frame.tracking) {
         return;
     }
 
     reconstruction->Integrate(frame.depth, frame.sensorPose);
     reconstruction->Remesh(kRemeshBudgetPerFrame);
-    reconstruction->CollectUpdates(chunkChanged_, chunkRemoved_);
+    reconstruction->CollectUpdates(chunkChanged, chunkRemoved);
 
-    for (const recon::ChunkKey& key : chunkRemoved_) {
-        const auto found = chunkNodes_.find(SpaceChunk{key.x, key.y, key.z});
-        if (found == chunkNodes_.end()) {
+    for (const recon::ChunkKey& key : chunkRemoved) {
+        const auto found = chunkNodes.find(SpaceChunk{key.x, key.y, key.z});
+        if (found == chunkNodes.end()) {
             continue;
         }
         // The node stays. Node has no RemoveChild, and it would be the wrong
@@ -212,9 +216,9 @@ void HelloWorld::UpdateReconstruction(const ar::CameraFrame& frame) {
         found->second.uploadsRemaining = 0;
     }
 
-    for (const recon::ChunkUpdate& update : chunkChanged_) {
+    for (const recon::ChunkUpdate& update : chunkChanged) {
         const SpaceChunk key{update.key.x, update.key.y, update.key.z};
-        ChunkNode& entry = chunkNodes_[key];
+        ChunkNode& entry = chunkNodes[key];
 
         if (entry.node == nullptr) {
             Node* node = root().AddChild(Node::Create("chunk"));
@@ -244,10 +248,10 @@ void HelloWorld::UpdateReconstruction(const ar::CameraFrame& frame) {
         }
 
         // --- the measurement that settles kChunkVertexCapacity ---
-        const size_t bucket = std::min<size_t>(chunkVertexHistogram_.size() - 1,
+        const size_t bucket = std::min<size_t>(chunkVertexHistogram.size() - 1,
                                                update.vertexCount / 512);
-        ++chunkVertexHistogram_[bucket];
-        ++chunkMeshCount_;
+        ++chunkVertexHistogram[bucket];
+        ++chunkMeshCount;
 
         // indices / vertices IS the deduplication ratio, and it needs no extra
         // plumbing to measure. Marching cubes emits three indices per triangle
@@ -259,11 +263,11 @@ void HelloWorld::UpdateReconstruction(const ar::CameraFrame& frame) {
         // Worth having as a number rather than a belief: if it comes back near
         // 1 the edge keys are not matching and the sharing is not happening,
         // and that would look identical on screen.
-        totalChunkVertices_ += update.vertexCount;
-        totalChunkIndices_ += update.indexCount;
+        totalChunkVertices += update.vertexCount;
+        totalChunkIndices += update.indexCount;
         if (update.vertexCount > kChunkVertexCapacity ||
             update.indexCount > kChunkIndexCapacity) {
-            ++chunkOverflowCount_;
+            ++chunkOverflowCount;
             // Skipped rather than truncated: half a chunk of geometry is a hole
             // with a torn edge, which reads as a reconstruction bug rather than
             // as the capacity problem it is.
@@ -277,8 +281,8 @@ void HelloWorld::UpdateReconstruction(const ar::CameraFrame& frame) {
 
     // Every 64 nodes. The failure this watches for is unbounded growth, so the
     // interesting quantity is how fast it climbs, not where it is.
-    if (chunkNodes_.size() >= lastReportedNodeCount_ + 64) {
-        lastReportedNodeCount_ = chunkNodes_.size();
+    if (chunkNodes.size() >= lastReportedNodeCount + 64) {
+        lastReportedNodeCount = chunkNodes.size();
         // What MeshStorage::Mutable actually reserves: kFramesInFlight regions
         // of (vertices + indices), whatever the chunk ends up using.
         const size_t bytesPerMesh =
@@ -287,41 +291,41 @@ void HelloWorld::UpdateReconstruction(const ar::CameraFrame& frame) {
         __android_log_print(ANDROID_LOG_INFO, kLogTag,
                             "RECONPROBE %zu chunk nodes reserving %zu MiB of mesh (%zu KiB each), "
                             "%u voxel chunks, %u awaiting remesh",
-                            chunkNodes_.size(), (chunkNodes_.size() * bytesPerMesh) / (1024 * 1024),
+                            chunkNodes.size(), (chunkNodes.size() * bytesPerMesh) / (1024 * 1024),
                             bytesPerMesh / 1024, reconstruction->chunkCount(),
                             reconstruction->pendingRemeshCount());
     }
 
-    if (!loggedChunkHistogram_ && chunkMeshCount_ >= 200) {
-        loggedChunkHistogram_ = true;
+    if (!loggedChunkHistogram && chunkMeshCount >= 200) {
+        loggedChunkHistogram = true;
         __android_log_print(ANDROID_LOG_INFO, kLogTag,
                             "RECONPROBE chunk vertex counts over %u remeshes, in buckets of 512: "
                             "%u %u %u %u %u %u %u %u (last bucket is 3584+); "
                             "%u exceeded the %u capacity",
-                            chunkMeshCount_, chunkVertexHistogram_[0], chunkVertexHistogram_[1],
-                            chunkVertexHistogram_[2], chunkVertexHistogram_[3],
-                            chunkVertexHistogram_[4], chunkVertexHistogram_[5],
-                            chunkVertexHistogram_[6], chunkVertexHistogram_[7],
-                            chunkOverflowCount_, kChunkVertexCapacity);
+                            chunkMeshCount, chunkVertexHistogram[0], chunkVertexHistogram[1],
+                            chunkVertexHistogram[2], chunkVertexHistogram[3],
+                            chunkVertexHistogram[4], chunkVertexHistogram[5],
+                            chunkVertexHistogram[6], chunkVertexHistogram[7],
+                            chunkOverflowCount, kChunkVertexCapacity);
         __android_log_print(ANDROID_LOG_INFO, kLogTag,
                             "RECONPROBE dedup ratio %.2fx (%llu indices over %llu vertices); "
                             "a soup reads 1.00, a fully shared surface about 6",
-                            totalChunkVertices_ > 0
-                                    ? static_cast<double>(totalChunkIndices_) /
-                                              static_cast<double>(totalChunkVertices_)
+                            totalChunkVertices > 0
+                                    ? static_cast<double>(totalChunkIndices) /
+                                              static_cast<double>(totalChunkVertices)
                                     : 0.0,
-                            static_cast<unsigned long long>(totalChunkIndices_),
-                            static_cast<unsigned long long>(totalChunkVertices_));
+                            static_cast<unsigned long long>(totalChunkIndices),
+                            static_cast<unsigned long long>(totalChunkVertices));
     }
 }
 
-void HelloWorld::UploadDirtyChunks(uint32_t frameIndex) {
+void OpenChiselWorld::UploadDirtyChunks(uint32_t frameIndex) {
     recon::Reconstruction* reconstruction = recon::reconstruction_holder::Get();
     if (reconstruction == nullptr) {
         return;
     }
 
-    for (auto& [key, entry] : chunkNodes_) {
+    for (auto& [key, entry] : chunkNodes) {
         if (entry.uploadsRemaining == 0 || entry.mesh == nullptr || entry.node == nullptr) {
             continue;
         }
@@ -331,11 +335,11 @@ void HelloWorld::UploadDirtyChunks(uint32_t frameIndex) {
             continue;
         }
 
-        vertexScratch_.resize(kChunkVertexCapacity);
-        indexScratch_.resize(kChunkIndexCapacity);
+        vertexScratch.resize(kChunkVertexCapacity);
+        indexScratch.resize(kChunkIndexCapacity);
         if (!reconstruction->WriteChunk(recon::ChunkKey{key.x, key.y, key.z},
-                                        vertexScratch_.data(), kChunkVertexCapacity,
-                                        indexScratch_.data(), kChunkIndexCapacity)) {
+                                        vertexScratch.data(), kChunkVertexCapacity,
+                                        indexScratch.data(), kChunkIndexCapacity)) {
             // The chunk went away between Update and here, or it outgrew the
             // capacity. Either way there is nothing to upload and retrying next
             // frame would not help.
@@ -348,18 +352,18 @@ void HelloWorld::UploadDirtyChunks(uint32_t frameIndex) {
         // left there.
         //
         // One region per call — see ChunkNode::uploadsRemaining.
-        entry.mesh->Update(frameIndex, vertexScratch_.data(), entry.vertexCount,
-                           indexScratch_.data(), entry.indexCount);
+        entry.mesh->Update(frameIndex, vertexScratch.data(), entry.vertexCount,
+                           indexScratch.data(), entry.indexCount);
         --entry.uploadsRemaining;
 
         if (!entry.node->renderable.has_value()) {
             entry.node->renderable = Renderable(*entry.mesh);
-            entry.node->renderable->material = chunkMaterial_;
+            entry.node->renderable->material = chunkMaterial;
         }
     }
 }
 
-void HelloWorld::Render(const FrameContext& frame) {
+void OpenChiselWorld::Render(const FrameContext& frame) {
     // Chunk geometry first, and it has to be HERE rather than in Update.
     //
     // Update runs before FrameRing::BeginFrame, which is the call that blocks
@@ -376,25 +380,25 @@ void HelloWorld::Render(const FrameContext& frame) {
     // The camera image goes up first, and outside any rendering scope, because
     // buffer-to-image copies and image barriers are both illegal inside one.
     // It opens no scope of its own — the final pass is what draws it.
-    if (cameraFeed_ != nullptr) {
+    if (cameraFeed != nullptr) {
         if (const ar::Subsystem* subsystem = ar::subsystem_holder::Get()) {
             // The guard holds the subsystem's lock across the upload. Without it,
             // the activity pausing mid-frame releases the ArImage being copied
             // out of — see AcquireFrame.
             const ar::Subsystem::FrameGuard guard = subsystem->AcquireFrame();
             GpuScope scope(frame, "camera upload");
-            cameraFeed_->Upload(frame, guard.get());
+            cameraFeed->Upload(frame, guard.get());
         }
     }
 
     // Transparent only when there is actually a feed behind it to reveal.
-    const bool hasFeed = cameraFeed_ != nullptr && cameraFeed_->ready();
+    const bool hasFeed = cameraFeed != nullptr && cameraFeed->ready();
     {
         GpuScope scope(frame, "mesh");
-        meshPass_->Render(frame, root(), hasFeed);
+        meshPass->Render(frame, root(), hasFeed);
     }
 
-    const Image* color = meshPass_->colorTarget();
+    const Image* color = meshPass->colorTarget();
     if (color == nullptr) {
         // The mesh pass gave up on its targets — a window with no area, most
         // likely. Nothing to composite.
@@ -402,8 +406,8 @@ void HelloWorld::Render(const FrameContext& frame) {
     }
     {
         GpuScope scope(frame, "final");
-        finalPass_->Render(frame, *color, cameraFeed_.get());
+        finalPass->Render(frame, *color, cameraFeed.get());
     }
 }
 
-} // namespace putorana::graphics
+} // namespace putorana::worlds::openChisel

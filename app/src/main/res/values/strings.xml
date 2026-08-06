@@ -1,3 +1,10 @@
 <resources>
     <string name="app_name">ARReconstructor</string>
+
+    <string name="world_menu">Worlds</string>
+
+    <!-- Names of the worlds themselves, so untranslatable. -->
+    <string name="world_hello_world" translatable="false">HelloWorld</string>
+    <string name="world_behaviours" translatable="false">Behaviours</string>
+    <string name="world_open_chisel" translatable="false">OpenChisel</string>
 </resources>
