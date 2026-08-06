@@ -4,16 +4,16 @@ title: "What Fixed the Reconstruction, and What Only Looked Like It Would"
 date: 2026-08-04
 ---
 
-A record of one day of work on `putorana::recon`, written down because most of it
-was wrong and the wrong parts are the expensive ones to rediscover.
+A record of the work that made `putorana::recon` usable, written down because
+most of it was wrong and the wrong parts are the expensive ones to rediscover.
 
 The reconstruction went from 8.7 fps and a wall of lumps to 30 fps and a surface
 that covers a floor, a bed, a fan and a doorway. Four things were changed to get
 there. Only one of them was the actual problem, and it was not any of the three
 that theory pointed at.
 
-The screenshots are the evidence. They are timestamped, they are all from the one
-device, and each section shows the one that belongs to it.
+The screenshots are the evidence. They are timestamped, they are all from the
+same phone, a Galaxy S25, and each section shows the one that belongs to it.
 
 ---
 
@@ -29,10 +29,10 @@ like this:
   <figcaption>The state at the start: torn sheets, lumps, floating fragments</figcaption>
 </figure>
 
-Three complaints, in the words they were made in: the mesh has gaps between
-chunks, there is noise that never goes away, and distant things reconstruct
-badly. The frame loop was running at 8.7 fps with the GPU finishing in 1.26 ms,
-so roughly 114 ms per frame was CPU time that nothing was measuring.
+The mesh had gaps between chunks, there was noise that never went away, and
+distant things reconstructed badly. The frame loop was running at 8.7 fps with
+the GPU finishing in 1.26 ms, so roughly 114 ms per frame was CPU time that
+nothing was measuring.
 
 There was also a standing failure from the day before. Four changes had been made
 at once (mesh capacity, weight cap, space carving, quadratic truncation) and the
@@ -347,7 +347,7 @@ at 129.
   <figcaption>Continuous surface across floor and wall</figcaption>
 </figure>
 
-| | Start of day | End of day |
+| | Before | After |
 |---|---|---|
 | frame loop | 8.7 fps | 30.0 fps (camera rate) |
 | integrate | ~114 ms | 19 ms at 111 chunks |
