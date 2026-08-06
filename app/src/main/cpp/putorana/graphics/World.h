@@ -40,7 +40,7 @@ struct FrameContext {
      *
      * It is replaced on every resize and rotation. A world that keeps render
      * targets of its own is responsible for noticing the extent changed and
-     * rebuilding them — there is no callback for it.
+     * rebuilding them; there is no callback for it.
      * */
     const Swapchain* swapchain = nullptr;
 
@@ -62,7 +62,7 @@ struct FrameContext {
  * that ownership is the whole point of the class:
  *
  *  - the scene tree, rooted at a node called ROOT;
- *  - the assets in it — meshes, materials;
+ *  - the assets in it, meshes and materials;
  *  - its own sequence of render passes, because each world draws differently
  *    and the chain therefore cannot live in the frame loop;
  *  - the frame's update, which walks the tree once.
@@ -70,7 +70,7 @@ struct FrameContext {
  * ## Lifetime: nested inside the Device's
  *
  * The Device dies every time the app goes to background and is rebuilt on the
- * way back, so the world dies with it — its meshes are VMA allocations from an
+ * way back, so the world dies with it: its meshes are VMA allocations from an
  * allocator that is about to stop existing. Device holds the unique_ptr and
  * releases it first in its teardown, which is what makes the ordering
  * unfixable rather than a rule somebody has to remember.
@@ -81,12 +81,12 @@ struct FrameContext {
  *
  * ## The two-phase construction
  *
- *   1. construct         — stores the device, makes ROOT. Cheap, cannot fail.
- *   2. CreateRenderPasses — HOW this world draws. Needs the swapchain, so it
+ *   1. construct:          stores the device, makes ROOT. Cheap, cannot fail.
+ *   2. CreateRenderPasses:  HOW this world draws. Needs the swapchain, so it
  *                           cannot happen before there is one.
- *   3. CreateWorld        — WHAT it draws: assets, materials, camera, lights.
- *   4. per frame          — Update(dt), then Render(context).
- *   5. destruction        — releases the lot.
+ *   3. CreateWorld:         WHAT it draws: assets, materials, camera, lights.
+ *   4. per frame:           Update(dt), then Render(context).
+ *   5. destruction:         releases the lot.
  *
  * Two virtuals rather than one because the two halves answer different
  * questions and fail for different reasons: a broken pipeline is a shader
@@ -104,7 +104,7 @@ public:
     Node& root() const { return *root_; }
 
     /**
-     * First node with this name, or null. O(n) — if it ever hurts, the world
+     * First node with this name, or null. O(n): if it ever hurts, the world
      * keeps a map. It is a read path for debugging and for tools, deliberately
      * by name rather than by cached Node*: a cached pointer dangles the moment
      * the surface is lost and the world is rebuilt.
@@ -132,7 +132,7 @@ public:
      * inherits orphans, and forgetting leaks the buffers of the old one. Scoped
      * to the world, the problem does not exist.
      *
-     * Returns null if the name is already taken — replacing silently would leave
+     * Returns null if the name is already taken: replacing silently would leave
      * live renderables pointing at a destroyed material.
      * */
     Material* AddMaterial(std::string name, std::unique_ptr<Material> material);
@@ -145,7 +145,7 @@ public:
      * very lists this would erase from.
      *
      * Queueing the same node twice is harmless, and so is queueing both a node
-     * and one of its descendants — the flush drops anything already covered by
+     * and one of its descendants: the flush drops anything already covered by
      * an ancestor rather than freeing it twice.
      *
      * Does not destroy meshes or materials: those are shared and stay the
@@ -159,7 +159,7 @@ public:
      *
      * The traversal lives here rather than in Node because of what will share
      * it: each node's behaviours run BEFORE that node's matrix closes, so a
-     * behaviour moving its own node — or a descendant — takes effect in the same
+     * behaviour moving its own node, or a descendant, takes effect in the same
      * frame, while touching an ANCESTOR whose matrix already closed shows up in
      * the next one. That ordering is a design decision, and it belongs to
      * whoever owns the frame.
@@ -167,7 +167,7 @@ public:
      * Call before Render, every frame.
      *
      * Virtual so a world can do its own per-frame work, and an override MUST
-     * call this base — skipping it leaves every world matrix at the previous
+     * call this base: skipping it leaves every world matrix at the previous
      * frame's value and nothing appears to move. Do that work BEFORE the base
      * call: it is what closes the matrices, so anything moved afterwards lands a
      * frame late.
@@ -215,7 +215,7 @@ private:
 
     // The assets, declared FIRST so they are destroyed LAST. Members go away in
     // reverse declaration order, and the tree below holds non-owning pointers
-    // into these two — a Renderable outliving its Mesh, even only for the length
+    // into these two: a Renderable outliving its Mesh, even only for the length
     // of a destructor, is exactly what this ordering rules out.
     std::vector<std::unique_ptr<Mesh>> meshes_;
     std::unordered_map<std::string, std::unique_ptr<Material>> materials_;

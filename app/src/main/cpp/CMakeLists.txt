@@ -36,45 +36,45 @@ find_library(jnigraphics-lib jnigraphics REQUIRED)
 find_library(camera2ndk-lib camera2ndk REQUIRED)
 find_library(mediandk-lib mediandk REQUIRED)
 
-# ARCore. O cabeçalho e a biblioteca vêm de sítios diferentes e comportam-se de
-# maneira diferente nesta build — ver app/src/main/cpp/third_party/arcore/README.md.
+# ARCore. The header and the library come from different places and behave
+# differently in this build. See app/src/main/cpp/third_party/arcore/README.md.
 #
-# O cabeçalho está vendorizado, logo existe sempre e é seguro exigi-lo: se
-# faltar, é um clone incompleto e mais vale dizê-lo já do que despejar centenas
-# de erros de "unknown type ArSession".
+# The header is vendored, so it always exists and it is safe to require it: if it
+# is missing, the clone is incomplete, and saying so now beats dumping hundreds of
+# "unknown type ArSession" errors.
 set(ARCORE_INCLUDE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/third_party/arcore/include)
 if(NOT EXISTS ${ARCORE_INCLUDE_DIR}/arcore_c_api.h)
     message(FATAL_ERROR
-            "arcore_c_api.h não está em ${ARCORE_INCLUDE_DIR}. "
-            "Ver third_party/arcore/README.md para o obter.")
+            "arcore_c_api.h is not in ${ARCORE_INCLUDE_DIR}. "
+            "See third_party/arcore/README.md for how to get it.")
 endif()
 
-# A biblioteca vem do AAR do Maven. Descarrega-se aqui, no configure, pela mesma
-# razão que o assimp vem por FetchContent logo acima: é a altura em que o CMake
-# sabe o que precisa e ainda pode falhar de forma legível.
+# The library comes from the Maven AAR. It is downloaded here, at configure time,
+# for the same reason assimp arrives through FetchContent just above: this is the
+# point where CMake knows what it needs and can still fail legibly.
 #
-# Porquê não deixar isto ao Gradle, que já resolve o mesmo AAR para o
-# `implementation`? Porque o AGP empacota o jni/ de um AAR no APK mas nunca
-# expõe esse caminho à build nativa — não há nada para onde apontar o
-# IMPORTED_LOCATION. Descompactá-lo numa task de Gradle (o que fazem os samples
-# C do SDK) obriga a resolver uma configuration durante a construção do grafo de
-# tasks, o que o AGP assinala como resolução em configuration time em todas as
-# builds, e mesmo assim deixaria o ficheiro em falta durante o sync do Android
-# Studio, que corre este configure fora do grafo de tasks.
+# Why not leave this to Gradle, which already resolves the same AAR for the
+# `implementation`? Because AGP packages an AAR's jni/ into the APK but never
+# exposes that path to the native build: there is nothing for IMPORTED_LOCATION
+# to point at. Unzipping it in a Gradle task (which is what the SDK's own C
+# samples do) forces a configuration to be resolved while the task graph is being
+# built, which AGP flags as configuration-time resolution on every build, and it
+# would still leave the file missing during an Android Studio sync, since sync
+# runs this configure outside the task graph.
 #
-# ARCORE_VERSION vem do version catalog, via app/build.gradle.kts.
+# ARCORE_VERSION comes from the version catalog, via app/build.gradle.kts.
 if(NOT DEFINED ARCORE_VERSION)
-    message(FATAL_ERROR "ARCORE_VERSION não foi definida — devia vir de app/build.gradle.kts.")
+    message(FATAL_ERROR "ARCORE_VERSION was not defined; it should come from app/build.gradle.kts.")
 endif()
 
 set(ARCORE_AAR ${CMAKE_CURRENT_BINARY_DIR}/arcore/core-${ARCORE_VERSION}.aar)
 set(ARCORE_UNPACKED ${CMAKE_CURRENT_BINARY_DIR}/arcore/unpacked)
 
-# Sem URL_HASH de propósito: um hash fixo aqui teria de ser atualizado a cada
-# bump de versão, num ficheiro diferente daquele que decide a versão, e a
-# proteção que dá é a mesma que o Gradle já dá (ou não dá) ao descarregar
-# exatamente este artefacto para o `implementation` — HTTPS para dl.google.com,
-# sem dependency verification. Não vale o terceiro sítio a manter em sincronia.
+# No URL_HASH on purpose: a fixed hash here would have to be updated on every
+# version bump, in a different file from the one that decides the version, and the
+# protection it buys is the same one Gradle already gives (or does not give) when
+# it downloads exactly this artifact for the `implementation`: HTTPS to
+# dl.google.com, with no dependency verification. Not worth a third place to sync.
 if(NOT EXISTS ${ARCORE_UNPACKED}/jni/${ANDROID_ABI}/libarcore_sdk_c.so)
     message(STATUS "Fetching ARCore ${ARCORE_VERSION}...")
     file(DOWNLOAD
@@ -86,22 +86,22 @@ if(NOT EXISTS ${ARCORE_UNPACKED}/jni/${ANDROID_ABI}/libarcore_sdk_c.so)
     list(GET ARCORE_DOWNLOAD_STATUS 0 ARCORE_DOWNLOAD_CODE)
     if(NOT ARCORE_DOWNLOAD_CODE EQUAL 0)
         list(GET ARCORE_DOWNLOAD_STATUS 1 ARCORE_DOWNLOAD_ERROR)
-        # O ficheiro parcial tem de desaparecer, senão o EXISTS acima dá-o por
-        # bom na próxima build e o erro reaparece lá à frente, no link.
+        # The partial file has to go, or the EXISTS above takes it for a good one
+        # on the next build and the error resurfaces further along, at link time.
         file(REMOVE ${ARCORE_AAR})
-        message(FATAL_ERROR "Falhou o download do AAR do ARCore: ${ARCORE_DOWNLOAD_ERROR}")
+        message(FATAL_ERROR "Downloading the ARCore AAR failed: ${ARCORE_DOWNLOAD_ERROR}")
     endif()
-    # ARCHIVE_EXTRACT reconhece o zip pelo conteúdo, não pela extensão .aar.
+    # ARCHIVE_EXTRACT recognises the zip by its content, not by the .aar extension.
     file(ARCHIVE_EXTRACT INPUT ${ARCORE_AAR} DESTINATION ${ARCORE_UNPACKED} PATTERNS "jni/*")
 endif()
 
 set(ARCORE_LIB ${ARCORE_UNPACKED}/jni/${ANDROID_ABI}/libarcore_sdk_c.so)
 if(NOT EXISTS ${ARCORE_LIB})
-    message(FATAL_ERROR "O AAR do ARCore não trazia jni/${ANDROID_ABI}/libarcore_sdk_c.so.")
+    message(FATAL_ERROR "The ARCore AAR did not carry jni/${ANDROID_ABI}/libarcore_sdk_c.so.")
 endif()
 
-# IMPORTED em vez de find_library: o .so não está no sysroot do NDK, é um
-# artefacto descarregado num caminho absoluto que já conhecemos.
+# IMPORTED rather than find_library: the .so is not in the NDK sysroot, it is a
+# downloaded artifact at an absolute path that is already known here.
 add_library(arcore::sdk_c SHARED IMPORTED)
 set_target_properties(arcore::sdk_c PROPERTIES IMPORTED_LOCATION ${ARCORE_LIB})
 # Creates and names a library, sets it as either STATIC
@@ -169,7 +169,7 @@ add_library(${CMAKE_PROJECT_NAME} SHARED
 # add_library above. A target picks up its <CONFIG>_POSTFIX from the matching
 # CMAKE_ variable at creation time, so ours silently became
 # libarreconstructord.so while System.loadLibrary("arreconstructor") kept asking
-# for the name without it — an UnsatisfiedLinkError at the first line of
+# for the name without it: an UnsatisfiedLinkError at the first line of
 # MainActivity, blaming a library that is right there in the APK.
 #
 # Set on the target rather than by clearing the cache variable, so assimp keeps
@@ -218,7 +218,7 @@ target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE
 # can link libraries from various origins, such as libraries defined in this
 # build script, prebuilt third-party libraries, or Android system libraries.
 # OpenChisel: the TSDF reconstruction library behind putorana::recon. Vendored
-# and modified rather than consumed as-is — upstream is a catkin package, and the
+# and modified rather than consumed as-is: upstream is a catkin package, and the
 # local changes alter type layouts, which cannot be done from outside a library.
 # See third_party/open_chisel/README.md for provenance and the full diff.
 #

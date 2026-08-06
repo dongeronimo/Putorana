@@ -16,7 +16,7 @@
  * Nothing in here includes volk.h, and nothing in here may. The products below
  * are plain memory and plain numbers; turning them into VkImages is the job of
  * putorana::graphics::CameraFeed, on the other side of that line. The
- * separation is not tidiness — the two halves have different lifetimes (see
+ * separation is not tidiness: the two halves have different lifetimes (see
  * below), so a class that held both would have no correct destructor.
  *
  * Because the rule is structural rather than a matter of discipline, it cannot
@@ -28,7 +28,7 @@
  * back, taking the whole World with it. An ArSession must NOT follow it:
  * destroying a session throws away tracking, and with it every anchor and
  * everything reconstructed so far. So this object lives at the same level as the
- * VkInstance — created once, paused and resumed with the ACTIVITY, destroyed
+ * VkInstance: created once, paused and resumed with the ACTIVITY, destroyed
  * only when the process is.
  *
  * ## Threads
@@ -36,7 +36,7 @@
  * Two touch it. Create/Resume/Pause come from the UI thread, driven by the
  * activity's lifecycle; Update comes from the render thread, once per frame.
  * ARCore's session is not thread-safe across those, so every entry point below
- * takes the same mutex. It is uncontended in the steady state — the only overlap
+ * takes the same mutex. It is uncontended in the steady state; the only overlap
  * is the moment the activity pauses while a frame is in flight, which is exactly
  * the race worth paying a lock to rule out.
  * */
@@ -68,9 +68,9 @@ namespace putorana::ar {
  * uploaded verbatim as a two-channel texture.
  *
  * Which of the two bytes is which is NOT fixed: NV12 puts U first, NV21 puts V
- * first, and both occur in the wild. Rather than guess — the symptom of guessing
+ * first, and both occur in the wild. Rather than guess (the symptom of guessing
  * is a picture with the reds and blues swapped, which reads as a colour-space
- * bug and sends you looking in the wrong place — the order is detected from the
+ * bug and sends you looking in the wrong place), the order is detected from the
  * plane pointers and reported here.
  * */
 struct CameraImage {
@@ -92,7 +92,7 @@ struct CameraImage {
  * Where ARCore believes the device is, and how it is held.
  *
  * Both poses ARCore offers have this shape, and WHICH ONE you are holding is
- * the thing to keep straight — see CameraFrame::displayPose and
+ * the thing to keep straight; see CameraFrame::displayPose and
  * CameraFrame::sensorPose. They differ by a rotation about the view axis of a
  * multiple of 90 degrees, which means picking the wrong one produces a result
  * that is not subtly off but sideways.
@@ -121,7 +121,7 @@ struct CameraPose {
  *
  * `fx` and `fy` are the focal length expressed in pixel widths and pixel
  * heights. They differ from each other only when the sensor's pixels are not
- * square, which on a phone they essentially always are — so expect fx ~= fy and
+ * square, which on a phone they essentially always are, so expect fx ~= fy and
  * treat a large gap between them as a bug rather than as a property of the
  * hardware. `cx`, `cy` are the principal point: where the optical axis actually
  * pierces the sensor, which is NEAR the centre of the image but not exactly at
@@ -134,7 +134,7 @@ struct CameraPose {
  * against a 640x480 image and against a 160x120 one gives fx four times apart.
  * So intrinsics without the dimensions they were measured at are not a
  * description of anything, and `width`/`height` travel with them for that
- * reason — they are what lets a reader (or a rescale) tell the two apart.
+ * reason: they are what lets a reader (or a rescale) tell the two apart.
  * */
 struct Intrinsics {
     /** Focal length in pixels, horizontal and vertical. */
@@ -160,13 +160,13 @@ struct Intrinsics {
  *
  * The part worth reading twice: it is the distance ALONG THE CAMERA'S PRINCIPAL
  * AXIS, not the length of the ray to the point. It is Z, not range. That is the
- * convenient case — unprojecting is then two multiplies and no square root (see
- * recon/README.md) — but code written for a time-of-flight sensor, which
+ * convenient case, since unprojecting is then two multiplies and no square root (see
+ * recon/README.md), but code written for a time-of-flight sensor, which
  * usually reports range, is wrong here in a way that bulges the reconstruction
  * outward at the edges of the frame while looking perfect at the centre.
  *
  * ARCore's own accuracy note: best between 0.5m and 15m, usable to 25m, with
- * error growing QUADRATICALLY with distance. That quadratic is not a footnote —
+ * error growing QUADRATICALLY with distance. That quadratic is not a footnote:
  * it is the reason a TSDF integrator weights near samples above far ones.
  *
  * ## Borrowed, like the camera image
@@ -214,7 +214,7 @@ struct DepthImage {
      * viewpoint the same flat patch produces the same spurious match, so fusing
      * a hundred frames converges on the artefact instead of averaging it away.
      * That is what the blobs on a featureless wall are, and no amount of
-     * truncation or weighting tuning reaches them — the input is confidently
+     * truncation or weighting tuning reaches them: the input is confidently
      * wrong rather than uncertain.
      *
      * This image is how ARCore says which is which, and Google's own guidance is
@@ -222,8 +222,8 @@ struct DepthImage {
      * below a confidence threshold of half confidence (128) tends to work well".
      * Using the raw stream without this is using half of the API.
      *
-     * Same dimensions as the depth map — ARCore documents all three of its depth
-     * outputs as identically sized — but its own stride, because it is an 8-bit
+     * Same dimensions as the depth map (ARCore documents all three of its depth
+     * outputs as identically sized) but its own stride, because it is an 8-bit
      * Y8 plane and this one is 16-bit.
      * */
     const uint8_t* confidence = nullptr;
@@ -289,7 +289,7 @@ struct CameraFrame {
      *
      * OpenGL conventions, which is what the C API produces everywhere: +Y up and
      * clip Z in [-1,1]. Vulkan wants neither, so whoever renders with it owes
-     * both conversions — see ArCamera.
+     * both conversions; see ArCamera.
      *
      * Not something to compute instead. It comes from the physical sensor's
      * intrinsics and the display geometry ARCore was told about, and a
@@ -304,7 +304,7 @@ struct CameraFrame {
      * The pose to RENDER with: ARCore's display-oriented pose.
      *
      * +X right, +Y up, -Z into the scene, with "right" and "up" meaning what
-     * they mean to someone holding the phone — the display rotation is already
+     * they mean to someone holding the phone: the display rotation is already
      * folded in. That is what makes it agree with `projection` above, and what
      * makes it the one to write into a scene graph.
      *
@@ -334,7 +334,7 @@ struct CameraFrame {
     CameraPose sensorPose;
 
     /**
-     * Intrinsics for the CPU camera image — `image` below, not `depth`.
+     * Intrinsics for the CPU camera image, `image` below, not `depth`.
      *
      * Kept even though `depth.intrinsics` is what the reconstruction reads,
      * because the rescale that produces the latter is only checkable against
@@ -363,14 +363,14 @@ struct CameraFrame {
      * This is what makes the feed appear the right way up and the right way
      * round. The camera sensor has a fixed orientation and a fixed aspect ratio,
      * neither of which is the screen's, and the mapping between them changes on
-     * every rotation. ARCore owns that mapping — the alternative is to rebuild it
+     * every rotation. ARCore owns that mapping; the alternative is to rebuild it
      * from the display rotation and two aspect ratios by hand, and get it subtly
      * wrong on the first tablet.
      *
      * A BASIS rather than three finished texture coordinates, for two reasons.
      * The three points handed to ARCore stay inside the unit square, so nothing
      * depends on how it treats out-of-range input. And the space it describes is
-     * the VIEW's — what the user is looking at — which is NOT the space a
+     * the VIEW's, what the user is looking at, which is NOT the space a
      * fullscreen triangle is drawn in whenever the swapchain carries a
      * preTransform. Composing the two is the renderer's job, because the
      * preTransform is the renderer's business and this namespace does not know
@@ -385,7 +385,7 @@ struct CameraFrame {
 class Subsystem {
 public:
     /**
-     * Creates the session. `context` must be an Android Context — the Activity
+     * Creates the session. `context` must be an Android Context, and the Activity
      * is what the samples pass and what the install flow needs.
      *
      * Fails, rather than being tolerated, when ARCore is not installed or the
@@ -404,7 +404,7 @@ public:
 
     /**
      * Starts the camera. Call from the activity's onResume, and only once the
-     * CAMERA permission has actually been granted — ARCore fails here rather
+     * CAMERA permission has actually been granted: ARCore fails here rather
      * than prompting.
      * */
     bool Resume(std::string& error);
@@ -415,7 +415,7 @@ public:
     /**
      * Tells ARCore the shape of the viewport it is projecting into.
      *
-     * `rotation` is the DISPLAY rotation — Surface.ROTATION_0/90/180/270 as an
+     * `rotation` is the DISPLAY rotation, Surface.ROTATION_0/90/180/270 as an
      * int, not the swapchain's preTransform, which is a related but different
      * quantity. Everything ARCore hands back in view coordinates, the UVs above
      * included, is wrong until this has been called with the truth.
@@ -437,7 +437,7 @@ public:
      * Call once per frame, BEFORE anything records a command buffer. It blocks
      * until a new camera image arrives or ARCore's built-in 66ms timeout
      * expires, which is why it belongs beside the world's Update and not inside
-     * a render pass — see the frame loop.
+     * a render pass; see the frame loop.
      *
      * Releases the previous frame's image, which invalidates every pointer
      * handed out by the last call.
@@ -449,9 +449,9 @@ public:
      *
      * ## Why this is not a plain getter
      *
-     * CameraFrame carries pointers into an ArImage this object owns, and Pause —
+     * CameraFrame carries pointers into an ArImage this object owns, and Pause,
      * which arrives on the UI thread, at any moment, because the user pressed
-     * Home — releases that image. A frame being recorded on the render thread at
+     * Home, releases that image. A frame being recorded on the render thread at
      * the same instant would be memcpy'ing from freed memory. The window is
      * real: onPause runs well before the surface is destroyed, so the render
      * thread is still going.
@@ -460,7 +460,7 @@ public:
      * cost is that Pause waits for the copy, which is a memcpy of about half a
      * megabyte, and the benefit is that it cannot happen underneath one.
      *
-     * get() answers null when there is no frame — the normal state for the first
+     * get() answers null when there is no frame, the normal state for the first
      * handful of frames after a Resume, while the camera stack comes up, which
      * ARCore reports as "not yet available" rather than as an error.
      * */
@@ -501,10 +501,10 @@ private:
     /** Poses, intrinsics, projection, tracking state, UV basis. Caller holds the mutex. */
     void ReadCamera();
 
-    /** The CPU image. Best effort — leaves the planes null when unavailable. */
+    /** The CPU image. Best effort: leaves the planes null when unavailable. */
     void ReadCameraImage();
 
-    /** The depth map. Best effort — leaves it null whenever there is none. */
+    /** The depth map. Best effort: leaves it null whenever there is none. */
     void ReadDepthImage();
 
     mutable std::mutex mutex_;
@@ -554,7 +554,7 @@ private:
      * This is not decoration. The rescale in ReadDepthImage assumes the depth
      * map covers the same field of view as the CPU image, and ARCore documents
      * the depth resolution as depending on "the device and its display aspect
-     * ratio" — wording that leaves room for a crop rather than a clean scale.
+     * ratio", wording that leaves room for a crop rather than a clean scale.
      * The two aspect ratios in that one log line are what settles it on a real
      * device, which is the only place it can be settled.
      * */
@@ -565,7 +565,7 @@ private:
 };
 
 /**
- * The one subsystem, reachable by name from the JNI entry points — the same
+ * The one subsystem, reachable by name from the JNI entry points, the same
  * shape as instance_holder, and for the same reason.
  *
  * Deliberately NOT device_holder's shape: that one constructs on first use,

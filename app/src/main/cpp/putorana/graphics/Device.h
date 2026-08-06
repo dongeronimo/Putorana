@@ -28,7 +28,7 @@ class World;
  * Everything whose lifetime follows the Android surface: the ANativeWindow, the
  * VkSurfaceKHR built on it and, next, the VkPhysicalDevice, the VkDevice with
  * its queues, and the swapchain hanging off them. The VkInstance is deliberately
- * not here — it outlives all of this, see Instance.h.
+ * not here: it outlives all of this, see Instance.h.
  *
  * This is not the renderer. The renderer is whatever draws *using* a device, and
  * it is not a class at all: it is this namespace. Device is only the bundle of
@@ -39,8 +39,8 @@ class World;
  * everything in this class happens on that single thread and needs no locking.
  *
  * There is exactly ONE exception, and it is SnapshotTimings(). The debug overlay
- * polls GPU timings from the UI thread while the render thread keeps rendering —
- * that is the entire point of it — so that one path is synchronised and every
+ * polls GPU timings from the UI thread while the render thread keeps rendering,
+ * which is the entire point of it, so that one path is synchronised and every
  * other member is not. Anything else reached from another thread has to be added
  * to this comment and given the same treatment, because the default here is no
  * locking at all.
@@ -80,7 +80,7 @@ public:
 
     /**
      * True once the whole chain is up: window, surface, adapter and logical
-     * device. There is no partial state — OnSurfaceCreated unwinds everything it
+     * device. There is no partial state: OnSurfaceCreated unwinds everything it
      * built if any step fails, so this one check covers all of them.
      * */
     bool HasSurface() const { return device_ != VK_NULL_HANDLE; }
@@ -98,7 +98,7 @@ public:
 
     /**
      * The single queue, from the single family. Graphics, compute, transfer and
-     * present all go here — see PhysicalDevice::queueFamily().
+     * present all go here; see PhysicalDevice::queueFamily().
      * */
     VkQueue queue() const { return queue_; }
 
@@ -115,7 +115,7 @@ public:
     /**
      * Rebuilds the swapchain when it is stale, and builds the first one. Returns
      * false when there is nothing to render into, in which case the caller must
-     * skip the frame and try again on the next one — a window mid-resize
+     * skip the frame and try again on the next one: a window mid-resize
      * legitimately has zero area for a moment.
      * */
     bool RecreateSwapchainIfNeeded();
@@ -124,14 +124,14 @@ public:
     const Swapchain& swapchain() const { return *swapchain_; }
 
     /**
-     * Valid whenever HasSurface(). Device lifetime, not swapchain lifetime — a
+     * Valid whenever HasSurface(). Device lifetime, not swapchain lifetime, and a
      * resize does not touch it.
      * */
     FrameRing& frames() const { return *frames_; }
 
     /**
      * Where every VkBuffer and VkImage comes from. Valid whenever HasSurface(),
-     * and only then — it is destroyed with the VkDevice, so anything holding an
+     * and only then: it is destroyed with the VkDevice, so anything holding an
      * allocation has to be released before the surface goes away. Pressing Home
      * runs that teardown, so "load the meshes once at startup" is not an option
      * in this app: whatever owns them has to be rebuilt with the device.
@@ -146,8 +146,8 @@ public:
     DescriptorPool& descriptorPool() const { return *descriptorPool_; }
 
     /**
-     * GPU timing, for the debug overlay. Device lifetime — its query pools
-     * belong to the VkDevice — so the Kotlin side must tolerate it going away
+     * GPU timing, for the debug overlay. Device lifetime (its query pools
+     * belong to the VkDevice) so the Kotlin side must tolerate it going away
      * and coming back when the app is backgrounded.
      *
      * RENDER THREAD ONLY, and it is not null-checked. That thread is the one
@@ -166,7 +166,7 @@ public:
      * or destroyed together: OnSurfaceDestroyed frees the profiler and only
      * nulls device_ eleven lines and a vkDestroyDevice later, and on the way up
      * device_ is set before GpuProfiler::Create returns. Both leave a window
-     * where HasSurface() is true and the profiler is not there — which crashed
+     * where HasSurface() is true and the profiler is not there, which crashed
      * inside Snapshot(), on the lock of a mutex that had been freed.
      *
      * So the check and the use have to happen under one lock, which means they
@@ -187,7 +187,7 @@ public:
 
     /**
      * Installs the scene, destroying whatever was there. Call once there is a
-     * swapchain — a world builds its pipelines against the surface format, so it
+     * swapchain: a world builds its pipelines against the surface format, so it
      * cannot be constructed any earlier.
      * */
     void SetWorld(std::unique_ptr<World> world);
@@ -221,14 +221,14 @@ private:
     std::unique_ptr<FrameRing> frames_;
     std::unique_ptr<GpuProfiler> profiler_;
     /**
-     * Guards the profiler_ POINTER, not the object — GpuProfiler has its own
+     * Guards the profiler_ POINTER, not the object; GpuProfiler has its own
      * lock for its contents. Held only where profiler_ is assigned or reset, and
      * in SnapshotTimings(); the render thread's own profiler() calls stay
      * unlocked because that thread is the one holding the object alive.
      * */
     mutable std::mutex profilerMutex_;
     std::unique_ptr<Swapchain> swapchain_;
-    /** Declared last, so it is destroyed first — before the allocator it drew from. */
+    /** Declared last, so it is destroyed first, before the allocator it drew from. */
     std::unique_ptr<World> world_;
 
     int32_t width_ = 0;

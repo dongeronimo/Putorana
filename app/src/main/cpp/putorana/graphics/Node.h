@@ -24,7 +24,7 @@ namespace putorana::graphics {
  * A Node by itself is a position, a scale and an attitude. What it IS comes from
  * what is attached: a node with a renderable is something drawn, a node with a
  * camera is a camera, a node with a light is a light. Anything can carry any
- * combination, and a node carrying none is a pure pivot — which is not a
+ * combination, and a node carrying none is a pure pivot, which is not a
  * degenerate case but the most common one, since that is what every parent is.
  *
  * ## Rotation: quaternion inside, unbounded Euler outside
@@ -37,7 +37,7 @@ namespace putorana::graphics {
  *    (500, -720.5, 1234) and you read back (500, -720.5, 1234). That is what
  *    lets an animation drive an angle continuously through 360 without the value
  *    jumping.
- *  - Setting the quaternion directly makes those raw numbers meaningless — a
+ *  - Setting the quaternion directly makes those raw numbers meaningless: a
  *    quaternion does not remember how many turns you took to get there. The
  *    cache is flagged stale and the next read of eulerAngles derives canonical
  *    angles instead (x in [-90,90], y and z in [-180,180]).
@@ -54,8 +54,8 @@ namespace putorana::graphics {
  *
  * A node owns its children, and a root is owned by whoever called Create.
  *
- * The alternative — every node a raw pointer, with one flat container owning
- * them all — is a real design and a common one, but it needs that container to
+ * The alternative, every node a raw pointer, with one flat container owning
+ * them all, is a real design and a common one, but it needs that container to
  * exist, and there is no World class yet. An owning tree needs nothing but
  * itself, and it fits this app's lifetime exactly: everything dies together when
  * the surface goes, so releasing the root releases the scene, with no traversal
@@ -90,9 +90,9 @@ public:
     // inline: no allocation, no indirection, and `if (node.renderable)` reads
     // the same as the TypeScript `if (node.renderable)`.
     //
-    // Light and Camera cannot use optional. Both are polymorphic bases — the
+    // Light and Camera cannot use optional. Both are polymorphic bases: the
     // actual object is a PointLight or a SpotLight, a PerspectiveCamera or an
-    // ArCamera — and optional<Base> stores a Base by value, which would slice
+    // ArCamera, and optional<Base> stores a Base by value, which would slice
     // the cone angles off a spot and ARCore's whole projection off a camera.
     // (Neither would even compile: both constructors are protected precisely so
     // that a bare base cannot exist.) Polymorphism means a pointer, so both are
@@ -103,7 +103,7 @@ public:
 
     /**
      * Non-null means this node is a camera. The VIEW matrix is the inverse of
-     * this node's world matrix — the camera looks down its own -Z, so the
+     * this node's world matrix: the camera looks down its own -Z, so the
      * transform below is the only thing that positions it.
      *
      * That holds for an ArCamera too, and deliberately: it writes ARCore's pose
@@ -128,8 +128,8 @@ public:
      * hundreds of chunks, which makes that difference worth having.
      *
      * The node's transform is not incidental here. Chunk mesh vertices are
-     * CHUNK LOCAL — the reconstruction subtracts the chunk origin on the way out
-     * — so this node's position is what puts the geometry back in the world, and
+     * CHUNK LOCAL (the reconstruction subtracts the chunk origin on the way out)
+     * so this node's position is what puts the geometry back in the world, and
      * it keeps vertex floats small near zero instead of tens of metres out where
      * a float32 mantissa starts eating the sub-millimetre detail marching cubes
      * worked to produce.
@@ -159,7 +159,7 @@ public:
 
     /**
      * Normalises on the way in, so everything downstream may assume a unit
-     * quaternion, and invalidates the Euler cache — see the class comment.
+     * quaternion, and invalidates the Euler cache; see the class comment.
      * */
     void SetRotation(const glm::quat& q);
 
@@ -188,7 +188,7 @@ public:
     void LookAt(const glm::vec3& target, const glm::vec3& up = glm::vec3(0.0f, 1.0f, 0.0f));
 
     /**
-     * Copies the LOCAL transform of `src` — position, scale, rotation — keeping
+     * Copies the LOCAL transform of `src` (position, scale, rotation) keeping
      * the RAW Euler state, the continuous (500, -720) that going through
      * SetRotation would flatten. Touches neither the hierarchy nor the
      * components.
@@ -210,7 +210,7 @@ public:
      *
      * Returns null and logs if the child is this node or one of its ancestors,
      * which would build a cycle that owns itself and never dies. In that case
-     * the child is destroyed along with its subtree — loudly, which beats a
+     * the child is destroyed along with its subtree, loudly, which beats a
      * graph that is quietly corrupt.
      * */
     Node* AddChild(std::unique_ptr<Node> child);
@@ -219,7 +219,7 @@ public:
      * Moves this node under `newParent`, carrying its subtree along. The normal
      * way to reparent.
      *
-     * Returns false, changing nothing, in two cases. One is a cycle — parenting
+     * Returns false, changing nothing, in two cases. One is a cycle, parenting
      * a node to its own descendant. The other is calling it on a node that is
      * still a root: its unique_ptr is held by whoever created it, and this
      * method has no way to take it away from them. Spell that one as
@@ -234,7 +234,7 @@ public:
      * Unhooks this node from its parent and hands ownership to the caller. Null
      * if it was already a root, in which case nothing changed.
      *
-     * For reparenting, prefer SetParent — this is for when you actually want the
+     * For reparenting, prefer SetParent; this is for when you actually want the
      * subtree in hand, or want it gone.
      *
      * nodiscard because dropping the result destroys the whole subtree. That is
@@ -251,7 +251,7 @@ public:
     glm::mat4 LocalMatrix() const;
 
     /**
-     * The CACHED world matrix — the cheap read, O(1).
+     * The CACHED world matrix, the cheap read, O(1).
      *
      * Valid only after UpdateWorldMatrices has run over this node this frame.
      * Change a transform after that and read this in the same frame and you see
@@ -262,7 +262,7 @@ public:
 
     /**
      * Recomposes THIS node's cached matrix onto its parent's cached one. The
-     * single step of a traversal somebody else owns — World::Update runs it
+     * single step of a traversal somebody else owns; World::Update runs it
      * interleaved with the node's behaviours, which is why the step is exposed
      * rather than buried inside the recursive version below.
      *
@@ -279,7 +279,7 @@ public:
     void UpdateWorldMatrices();
 
     /**
-     * The world matrix computed FRESH, walking up the parent chain — O(depth)
+     * The world matrix computed FRESH, walking up the parent chain, O(depth)
      * per call, always current. For use outside the frame loop, where the cache
      * has not been refreshed: right after building a tree, for instance. In the
      * frame's hot path, read worldMatrix().
@@ -294,7 +294,7 @@ private:
     glm::quat rotation_{1.0f, 0.0f, 0.0f, 0.0f};
 
     /**
-     * The last Euler angles set by hand, in degrees and unclamped — may hold
+     * The last Euler angles set by hand, in degrees and unclamped; may hold
      * 500, may hold -720.5. Only trustworthy while eulerInSync_ is true.
      *
      * mutable because reading eulerAngles() on a stale cache derives and stores

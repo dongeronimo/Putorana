@@ -31,8 +31,8 @@ int64_t g_lastFrameNanos = 0;
  * Seconds since the previous frame, clamped.
  *
  * The clamp is the whole reason this is a function. Coming back from background
- * produces a gap of seconds, and every consumer of a delta — animation, physics,
- * a follow camera — integrates it: unclamped, the first frame back teleports
+ * produces a gap of seconds, and every consumer of a delta (animation, physics,
+ * a follow camera) integrates it: unclamped, the first frame back teleports
  * everything. Capping at 100ms turns that into a hitch instead, which is what
  * every engine does and for the same reason.
  * */
@@ -175,7 +175,7 @@ void RecordFrame(VkCommandBuffer commandBuffer, const Swapchain& swapchain, uint
     // tiler that is not a small thing: preserving pixels means reading the whole
     // image back into tile memory before drawing over it.
     //
-    // It is only correct because whatever runs below covers every pixel — the
+    // It is only correct because whatever runs below covers every pixel: the
     // placeholder is a full screen clear, and a world's final pass is a full
     // screen quad. A world that ever wants to composite ONTO the previous
     // frame's image would need this to become PRESENT_SRC_KHR, and would need
@@ -199,7 +199,7 @@ void RecordFrame(VkCommandBuffer commandBuffer, const Swapchain& swapchain, uint
         frame.imageIndex = imageIndex;
         frame.profiler = &profiler;
         // The outermost scope, so the overlay can show what the passes inside it
-        // do NOT account for — barriers, transitions, and whatever the driver
+        // do NOT account for: barriers, transitions, and whatever the driver
         // does between them.
         GpuScope scope(frame, "frame");
         world->Render(frame);
@@ -246,7 +246,7 @@ void DrawFrame(int64_t frameTimeNanos) {
     // Builds the first world, and every world the menu switches to afterwards.
     // Here and not in Device::OnSurfaceCreated because a world's pipelines are
     // built for the surface's colour format, which is only known once the
-    // swapchain exists — and RecreateSwapchainIfNeeded has just guaranteed one.
+    // swapchain exists, and RecreateSwapchainIfNeeded has just guaranteed one.
     //
     // This namespace no longer names a concrete world at all: which scene is
     // showing is putorana::worlds' business, and everything here works through
@@ -255,7 +255,7 @@ void DrawFrame(int64_t frameTimeNanos) {
 
     // The AR session's tick, and it is FIRST for two reasons.
     //
-    // It blocks — up to ARCore's built-in 66ms — waiting for the next camera
+    // It blocks, for up to ARCore's built-in 66ms, waiting for the next camera
     // image, so it has to happen before BeginFrame and before the acquire below,
     // or it would sleep while holding a swapchain image and a frame slot.
     //

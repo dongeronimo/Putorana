@@ -20,7 +20,7 @@ constexpr const char* kLogTag = "ARReconstructor";
  * Three points, and all of them inside the unit square on purpose. What comes
  * back is enough to reconstruct the whole affine map, and reconstructing it
  * ourselves is what keeps this independent of how ArFrame_transformCoordinates2d
- * treats coordinates outside its domain — which is not documented, and which a
+ * treats coordinates outside its domain, which is not documented, and which a
  * fullscreen triangle's off-screen corners would otherwise be relying on.
  * */
 constexpr float kViewBasis[6] = {
@@ -39,7 +39,7 @@ ArCameraIntrinsics* Intrin(void* handle) { return static_cast<ArCameraIntrinsics
  * Copies an ArPose out into our own struct.
  *
  * ArPose_getPoseRaw's seven floats are the quaternion FIRST and the translation
- * second — qx, qy, qz, qw, tx, ty, tz — which is the order CameraPose mirrors so
+ * second (qx, qy, qz, qw, tx, ty, tz), which is the order CameraPose mirrors so
  * that this stays a straight copy with nothing to get backwards.
  * */
 void ReadPoseInto(ArSession* session, ArPose* pose, CameraPose& out) {
@@ -93,7 +93,7 @@ std::unique_ptr<Subsystem> Subsystem::Create(JNIEnv* env, jobject context, std::
     ArConfig* config = nullptr;
     ArConfig_create(session, &config);
 
-    // The point of this line is NOT the hardware buffer — nothing here reads
+    // The point of this line is NOT the hardware buffer: nothing here reads
     // one. It is that this mode makes ARCore stop wanting an OpenGL texture.
     //
     // The default, AR_TEXTURE_UPDATE_MODE_BIND_TO_TEXTURE_EXTERNAL_OES, expects
@@ -119,13 +119,13 @@ std::unique_ptr<Subsystem> Subsystem::Create(JNIEnv* env, jobject context, std::
     // Asked about first rather than set optimistically. AR_DEPTH_MODE_AUTOMATIC
     // on a device that cannot do it makes ArSession_configure fail with
     // AR_ERROR_UNSUPPORTED_CONFIGURATION, and that failure would take the whole
-    // session down — camera feed, tracking and all — over a capability the rest
+    // session down (camera feed, tracking and all) over a capability the rest
     // of the app does not need. So the query decides, the flag is remembered,
     // and a device without depth still gets everything else.
     //
     // AUTOMATIC and not RAW_DEPTH_ONLY. Automatic is the smoothed, filled-in
     // map: every pixel carries an estimate, temporally fused across frames.
-    // Raw is sparse — zero wherever ARCore is unsure — and comes with a separate
+    // Raw is sparse (zero wherever ARCore is unsure) and comes with a separate
     // confidence image. Raw is arguably the better input for a TSDF, which does
     // its own fusion and would rather not integrate someone else's guesses
     // twice; the reason it is not the choice here is that we cannot yet tell
@@ -262,7 +262,7 @@ void Subsystem::Update() {
         return;
     }
 
-    // The camera's half always succeeds once the update did — pose, projection
+    // The camera's half always succeeds once the update did: pose, projection
     // and tracking state exist from the first frame, even while the pose is
     // still meaningless. The IMAGE is the part that can be missing, for several
     // frames after a resume and on devices that do not offer CPU images at all,
@@ -327,7 +327,7 @@ void Subsystem::ReadCamera() {
     ArFrame* frame = Frame(arFrame_);
 
     // The ArCamera is a reference type: acquired per frame, released here. It is
-    // NOT the ArSession's camera object in any lasting sense — holding one past
+    // NOT the ArSession's camera object in any lasting sense; holding one past
     // the frame it came from is what ArCamera_release exists to prevent.
     ArCamera* camera = nullptr;
     ArFrame_acquireCamera(session, frame, &camera);
@@ -355,7 +355,7 @@ void Subsystem::ReadCamera() {
     ReadPoseInto(session, Pose(pose_), frame_.sensorPose);
 
     // "Unrotated and uncropped intrinsics for the image (CPU) stream", in
-    // ARCore's words — which is precisely why they belong with sensorPose and
+    // ARCore's words, which is precisely why they belong with sensorPose and
     // not with displayPose. Re-read every frame because the header says they
     // may change per frame; autofocus moves the focal length.
     ArCameraIntrinsics* intrinsics = Intrin(intrinsics_);
@@ -370,7 +370,7 @@ void Subsystem::ReadCamera() {
     ArCamera_release(camera);
 
     // Recomputed every frame rather than only when ArFrame_getDisplayGeometryChanged
-    // reports a change. It is six floats through an affine transform — cheaper
+    // reports a change. It is six floats through an affine transform, cheaper
     // than the branch that would avoid it, and it cannot go stale.
     ArFrame_transformCoordinates2d(session, frame, AR_COORDINATES_2D_VIEW_NORMALIZED, 3,
                                    kViewBasis, AR_COORDINATES_2D_IMAGE_NORMALIZED,
@@ -487,7 +487,7 @@ void Subsystem::ReadDepthImage() {
     // views removes noise because the errors are INDEPENDENT and cancel;
     // pre-smoothed data is correlated between frames, so averaging it converges
     // on the smoothing rather than on the surface. Inpainted regions are worse
-    // still — that error is systematic, and the mean of a hundred views of the
+    // still: that error is systematic, and the mean of a hundred views of the
     // same guess is the guess.
     //
     // The raw stream is "mostly unfiltered", sparse, and leaves 0 wherever it
@@ -503,7 +503,7 @@ void Subsystem::ReadDepthImage() {
     const ArStatus acquired = ArFrame_acquireRawDepthImage16Bits(session, frame, &image);
     if (acquired != AR_SUCCESS) {
         // NOT_YET_AVAILABLE is the ordinary state while ARCore accumulates the
-        // motion it needs to estimate depth at all — the user has to move the
+        // motion it needs to estimate depth at all: the user has to move the
         // phone before there is anything to have. Not an error, and not worth a
         // line sixty times a second.
         if (acquired != AR_ERROR_NOT_YET_AVAILABLE && !warnedAboutDepth_) {
@@ -530,7 +530,7 @@ void Subsystem::ReadDepthImage() {
     }
 
     // The cast is safe in a way that is worth stating rather than assuming.
-    // D_16 is a single 16-bit plane, and ARCore hands back the start of a row —
+    // D_16 is a single 16-bit plane, and ARCore hands back the start of a row,
     // an address the hardware itself required to be 2-byte aligned to produce
     // 16-bit pixels at. Little-endian matches every arm64 Android device, and
     // the ABI this project builds is arm64 only.
@@ -672,14 +672,14 @@ void Subsystem::ReadDepthImage() {
     // Crucially the crop is derived from the two aspect ratios rather than
     // hardcoded, so a device that crops the other way, or not at all, lands in
     // the same three lines. And because the crop restores the aspect ratio
-    // before the resample, scaleX and scaleY come out EQUAL — which is the
+    // before the resample, scaleX and scaleY come out EQUAL, which is the
     // invariant the probe below asserts. If they ever disagree, the crop is not
     // centred and this model is wrong.
     //
     // Verified on the measured numbers: cropTop = 60, scale = 0.25,
     // fx 439.73 -> 109.93, fy 440.19 -> 110.05, cx 314.88 -> 78.72,
     // cy 241.35 -> 45.34. The off-centre principal point (+1.35px of 480)
-    // survives as +0.34px of 90 — exactly a quarter — which is independent
+    // survives as +0.34px of 90, exactly a quarter, which is independent
     // confirmation that the crop really is centred.
     // Hoisted out of the block below only so the probe can report them.
     float cropLeft = 0.0f;
@@ -748,7 +748,7 @@ void Subsystem::ReadDepthImage() {
 
         // D_16 is 16 bits per sample, so a tightly packed row is width * 2 bytes.
         // Anything larger means padding, and every read has to go through
-        // rowStrideBytes rather than width — which the code does, but that would
+        // rowStrideBytes rather than width, which the code does, but that would
         // be by luck rather than on purpose, so it is worth knowing.
         const int32_t tightStride = out.width * 2;
         __android_log_print(ANDROID_LOG_INFO, kLogTag,
@@ -767,7 +767,7 @@ void Subsystem::ReadDepthImage() {
                             kProbe, out.smoothedMillimetres != nullptr ? "PRESENT" : "ABSENT",
                             out.smoothedRowStrideBytes);
 
-        // A mismatch here is NOT a failure any more — it is the measured reality
+        // A mismatch here is NOT a failure any more: it is the measured reality
         // on this hardware (16:9 depth from a 4:3 image) and the rescale handles
         // it. What it changes is which line below is load bearing: with a crop
         // in play, the scale invariant is the thing that has to hold.
@@ -797,7 +797,7 @@ void Subsystem::ReadDepthImage() {
             //     fov = 2 * atan(width / (2 * fx))
             //
             // This is the number that catches a wrong fx. A wrong focal length
-            // does not produce a broken-looking reconstruction — it produces a
+            // does not produce a broken-looking reconstruction; it produces a
             // room that is uniformly the wrong size, which is much harder to
             // notice later than a nonsense angle is to notice now.
             constexpr float kRadToDeg = 57.2957795f;
@@ -821,7 +821,7 @@ void Subsystem::ReadDepthImage() {
             // fy are equal for square pixels. It ties fx, fy, width and height
             // together in one number, so no single one of them can be wrong
             // without showing up here. With the old height-ratio rescale this
-            // came out 1.335 against a 1.778 image — a 25% error that every
+            // came out 1.335 against a 1.778 image, a 25% error that every
             // other line in this probe reported as fine.
             const float fovRatio = std::tan(hfov * 0.5f / kRadToDeg)
                                    / std::tan(vfov * 0.5f / kRadToDeg);
@@ -831,7 +831,7 @@ void Subsystem::ReadDepthImage() {
                                 kProbe, fovRatio, depthAspect,
                                 fovConsistent ? "CONSISTENT" : "INCONSISTENT");
 
-            // Off-centre is normal and physical — it is why ARCore's projection
+            // Off-centre is normal and physical: it is why ARCore's projection
             // matrix has terms off the diagonal. Wildly off-centre is not.
             __android_log_print(ANDROID_LOG_INFO, kLogTag,
                                 "%s principal point %+.1f, %+.1f px from centre of %dx%d",
@@ -841,7 +841,7 @@ void Subsystem::ReadDepthImage() {
                                 out.width, out.height);
         }
 
-        // The verdict is no longer "do the aspects match" — they do not on this
+        // The verdict is no longer "do the aspects match": they do not on this
         // hardware, and that is handled. It is whether the derived intrinsics are
         // self-consistent: a uniform scale (so the crop model holds) and a field
         // of view that agrees with the image shape (so fx and fy agree with each
@@ -878,7 +878,7 @@ std::unique_ptr<Subsystem> g_subsystem;
  * is read from: Create runs on the UI thread when the camera permission comes
  * back, while the frame loop calls Get on the render thread sixty times a
  * second. A bare pointer written by one and read by the other is a data race in
- * the language's own terms, whatever the hardware happens to do with it — and
+ * the language's own terms, whatever the hardware happens to do with it, and
  * the release/acquire pair is also what publishes everything the constructor
  * wrote, not merely the pointer's own bytes.
  * */

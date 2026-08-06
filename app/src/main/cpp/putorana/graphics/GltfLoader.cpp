@@ -24,8 +24,8 @@ constexpr const char* kLogTag = "ARReconstructor";
  * the edge stays hard.
  *
  * Only ever used for a mesh that arrived with no normals at all. It matters
- * because assimp's default is 175 degrees, which smooths practically everything
- * — and a cube whose eight corners have been smoothed together looks like a
+ * because assimp's default is 175 degrees, which smooths practically everything,
+ * and a cube whose eight corners have been smoothed together looks like a
  * lighting bug rather than like a missing attribute. 66 keeps a cube a cube and
  * still smooths anything genuinely curved.
  * */
@@ -61,13 +61,13 @@ glm::vec3 ToGlm(const aiVector3D& v) {
 /**
  * One assimp mesh into one of ours, uploaded and handed to the world.
  *
- * Returns null for anything that is not a triangle mesh — points and lines come
+ * Returns null for anything that is not a triangle mesh: points and lines come
  * out of SortByPType as their own meshes and there is no pipeline for them.
  * */
 Mesh* BuildMesh(World& world, const aiMesh& src, const std::string& name) {
     if (src.mPrimitiveTypes != aiPrimitiveType_TRIANGLE) {
         __android_log_print(ANDROID_LOG_WARN, kLogTag,
-                            "glTF: skipping '%s' — not a triangle mesh (types 0x%x)", name.c_str(),
+                            "glTF: skipping '%s', not a triangle mesh (types 0x%x)", name.c_str(),
                             src.mPrimitiveTypes);
         return nullptr;
     }
@@ -78,7 +78,7 @@ Mesh* BuildMesh(World& world, const aiMesh& src, const std::string& name) {
     }
     if (src.HasBones()) {
         __android_log_print(ANDROID_LOG_WARN, kLogTag,
-                            "glTF: '%s' has %u bones but skinning is not loaded yet — it will "
+                            "glTF: '%s' has %u bones but skinning is not loaded yet, so it will "
                             "draw rigid, in its bind pose",
                             name.c_str(), src.mNumBones);
     }
@@ -94,7 +94,7 @@ Mesh* BuildMesh(World& world, const aiMesh& src, const std::string& name) {
                                : glm::vec2(0.0f);
     }
     if (!hasUv) {
-        __android_log_print(ANDROID_LOG_WARN, kLogTag, "glTF: '%s' has no UVs — filling with zeros",
+        __android_log_print(ANDROID_LOG_WARN, kLogTag, "glTF: '%s' has no UVs, filling with zeros",
                             name.c_str());
     }
 
@@ -167,8 +167,8 @@ struct Conversion {
         result.nodes.push_back(raw);
 
         // Decompose rather than store the matrix: a Node's transform IS position,
-        // rotation and scale, and everything downstream — a behaviour that spins
-        // the cube, the Euler view — edits those. Decompose reads assimp's
+        // rotation and scale, and everything downstream (a behaviour that spins
+        // the cube, the Euler view) edits those. Decompose reads assimp's
         // row-major matrix correctly on its own, so there is no transpose here;
         // one would silently produce a transform that is almost right.
         aiVector3D scale;
@@ -221,7 +221,7 @@ bool LoadGltf(World& world, const std::string& assetPath, GltfLoadResult& result
 
     // From memory, not from a path: an asset inside an APK is not a file, so
     // there is nothing for assimp's default IO system to open. The "glb" hint
-    // tells it which importer to use without a filename to guess from — and it
+    // tells it which importer to use without a filename to guess from, and it
     // is also why only .glb works, since a plain .gltf would send the parser
     // looking for sibling .bin and image files that do not exist here.
     const aiScene* scene = importer.ReadFileFromMemory(bytes.data(), bytes.size(),
@@ -231,7 +231,7 @@ bool LoadGltf(World& world, const std::string& assetPath, GltfLoadResult& result
         return false;
     }
     if ((scene->mFlags & AI_SCENE_FLAGS_INCOMPLETE) != 0) {
-        // Not fatal — it usually means something this pass ignores anyway — but
+        // Not fatal (it usually means something this pass ignores anyway) but
         // it is the first thing to look at when geometry is missing.
         __android_log_print(ANDROID_LOG_WARN, kLogTag, "glTF: '%s' loaded incomplete",
                             assetPath.c_str());
@@ -244,7 +244,7 @@ bool LoadGltf(World& world, const std::string& assetPath, GltfLoadResult& result
     // extra identity node out of every loaded scene.
     //
     // Usually. A root that carries geometry itself is a real node, not a
-    // wrapper, and unwrapping it would throw the model away — so in that case,
+    // wrapper, and unwrapping it would throw the model away, so in that case,
     // and in the degenerate case of a root with no children at all, it is kept.
     const aiNode& root = *scene->mRootNode;
     if (root.mNumMeshes > 0 || root.mNumChildren == 0) {

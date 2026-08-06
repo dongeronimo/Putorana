@@ -18,8 +18,8 @@ import java.util.concurrent.CountDownLatch
  * around to reason about.
  *
  * Frames come from [Choreographer], not from a `while (true)` loop. Choreographer
- * fires once per vsync on the Looper it was obtained on — the render thread's,
- * here — so the loop cannot outrun the display, and each callback carries the
+ * fires once per vsync on the Looper it was obtained on (the render thread's,
+ * here) so the loop cannot outrun the display, and each callback carries the
  * timestamp of the vsync it belongs to.
  */
 class RenderThread {
@@ -69,7 +69,7 @@ class RenderThread {
     /**
      * Reports a resize (or a format change) and starts the frame loop if it is
      * not running yet. Android always sends surfaceChanged right after
-     * surfaceCreated, so this — not surfaceCreated — is where the loop begins,
+     * surfaceCreated, so this, not surfaceCreated, is where the loop begins,
      * and it is also where it restarts after every rotation.
      */
     fun surfaceChanged(format: Int, width: Int, height: Int) {
@@ -84,7 +84,7 @@ class RenderThread {
 
     /**
      * Asks the renderer for a different world. Posted rather than called
-     * straight through, because the caller is the UI thread — a menu tap — and
+     * straight through, because the caller is the UI thread, a menu tap — and
      * the native side takes no locks precisely because everything reaches it on
      * this one thread.
      *

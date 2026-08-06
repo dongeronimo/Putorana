@@ -15,7 +15,7 @@ namespace putorana::graphics {
  * The passes a Renderable can take part in, one bit each.
  *
  * A bitmask rather than a single "which pass" field because one object really
- * does belong to several at once — the same crate is drawn by the main pass and
+ * does belong to several at once: the same crate is drawn by the main pass and
  * again by every shadow pass. Each pass walks the tree and skips whoever lacks
  * its bit.
  *
@@ -28,7 +28,7 @@ enum class RenderPassBit : uint32_t {
     Main = 1u << 0,
 
     /**
-     * Drawn by the skinned pass instead of the main one — INSTEAD, not as well.
+     * Drawn by the skinned pass instead of the main one. INSTEAD, not as well.
      * The per-object descriptor set is a different shape (a pool of bone
      * matrices, not one model matrix), so a mesh cannot be in both.
      *
@@ -44,7 +44,7 @@ enum class RenderPassBit : uint32_t {
  * An OR of RenderPassBit values.
  *
  * Plain uint32_t and not RenderPassBit, because the OR of two enumerators is
- * not itself an enumerator — typing it as the enum would be a lie the compiler
+ * not itself an enumerator, and typing it as the enum would be a lie the compiler
  * happens to accept.
  * */
 using RenderPassMask = uint32_t;
@@ -61,8 +61,8 @@ constexpr RenderPassMask operator|(RenderPassMask a, RenderPassBit b) {
  * What a scene node draws. One Mesh, one Material, and the handful of per-object
  * decisions that are the object's to make rather than the asset's.
  *
- * It owns neither of them. Mesh and Material are GPU assets shared by reference
- * — the two hundred wall tiles of a dungeon point at one Mesh and one Material
+ * It owns neither of them. Mesh and Material are GPU assets shared by reference:
+ * the two hundred wall tiles of a dungeon point at one Mesh and one Material
  * between them, and the thing that destroys those assets is whatever loaded
  * them, which has to die with the Device. A Renderable is small, cheap and
  * plain: two pointers and two fields.
@@ -85,7 +85,7 @@ public:
     explicit Renderable(Mesh& mesh) : mesh_(&mesh) {}
 
     /**
-     * Null until something assigns one — the loader builds renderables from a
+     * Null until something assigns one: the loader builds renderables from a
      * glTF, which carries no material of ours. A pass that meets a null material
      * is expected to substitute a loud fallback rather than skip the draw: an
      * object screaming "I have no material" is far easier to debug than an
@@ -100,13 +100,13 @@ public:
     RenderPassMask passMask = static_cast<RenderPassMask>(RenderPassBit::Main);
 
     /**
-     * Does this object CAST a shadow? Nothing reads it yet — there is no shadow
-     * pass — but it belongs to the Renderable rather than to the Material, and
+     * Does this object CAST a shadow? Nothing reads it yet (there is no shadow
+     * pass) but it belongs to the Renderable rather than to the Material, and
      * that placement is the decision worth recording now.
      *
      * It is a question about the object because two objects sharing one material
      * are allowed to disagree, and because it is the object that occupies space.
-     * The case that forces it is ground clutter: grass, pebbles, debris —
+     * The case that forces it is ground clutter: grass, pebbles, debris,
      * geometry thinner than a shadow-map texel, which contributes no lighting
      * information and a great deal of artefact (hard speckle, aliasing, a shadow
      * detached from its own base by the depth bias), and costs a draw in every
@@ -120,7 +120,7 @@ public:
 
     /**
      * The geometry. A reference and not a pointer at the call site because it is
-     * never null — the constructor requires one.
+     * never null; the constructor requires one.
      * */
     Mesh& mesh() const { return *mesh_; }
 
@@ -145,7 +145,7 @@ public:
      * and the two extreme corners of the local box are generally not the extreme
      * corners of the transformed one.
      *
-     * `worldMatrix` must be affine — a node transform, which is what it will
+     * `worldMatrix` must be affine, a node transform, which is what it will
      * always be. The result is conservative: a rotated box grows, and it never
      * shrinks back on its own.
      * */
@@ -156,7 +156,7 @@ private:
     Mesh* mesh_;
 };
 
-// The copy is the prefab clone — see the class comment. Pinned here so that
+// The copy is the prefab clone; see the class comment. Pinned here so that
 // adding a member that breaks it (a unique_ptr, a reference) fails the build
 // instead of quietly turning instantiation into a compile error somewhere far
 // away, or worse, into a deep copy of something that was meant to be shared.

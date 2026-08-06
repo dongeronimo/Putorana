@@ -6,7 +6,7 @@ import android.view.Surface
 /**
  * The Kotlin side of the native renderer: the entry points into
  * putorana::graphics. Nothing here holds state, and nothing here does its own
- * threading — every one of these must be called from the render thread, which is
+ * threading: every one of these must be called from the render thread, which is
  * [RenderThread]'s job. The native side relies on that and takes no locks.
  */
 object NativeRenderer {
@@ -28,7 +28,7 @@ object NativeRenderer {
      *
      * An app's assets are not files: they live inside the APK, usually
      * compressed, so there is no path native code could open. Native keeps a
-     * global JNI reference to [assets] — the AAssetManager pointer it derives is
+     * global JNI reference to [assets]: the AAssetManager pointer it derives is
      * only valid while the Java object is alive.
      *
      * Unlike everything else here, this one does NOT have to be on the render
@@ -48,7 +48,7 @@ object NativeRenderer {
 
     /**
      * The window changed size or pixel format. Always called at least once right
-     * after [surfaceCreated], so this — not surfaceCreated — is the reliable
+     * after [surfaceCreated], so this, not surfaceCreated, is the reliable
      * place to learn the actual dimensions, and where the swapchain is
      * created/recreated.
      *
@@ -61,7 +61,7 @@ object NativeRenderer {
 
     /**
      * The window is going away. This must fully tear down anything that touches
-     * it before returning — vkDeviceWaitIdle, destroy swapchain, destroy
+     * it before returning: vkDeviceWaitIdle, destroy swapchain, destroy
      * VkSurfaceKHR, release the ANativeWindow. Android's contract is that the
      * Surface is invalid the instant this returns, and using it afterwards is
      * undefined behaviour, not an exception.
@@ -85,7 +85,7 @@ object NativeRenderer {
      *
      * Asynchronous in the only sense that matters: this records the request and
      * returns, and the teardown of the old world and the build of the new one
-     * happen inside the next [drawFrame]. That is not an optimisation — a world
+     * happen inside the next [drawFrame]. That is not an optimisation: a world
      * builds its pipelines against the swapchain's format, and the frame loop is
      * the only thing that knows there is a swapchain.
      *

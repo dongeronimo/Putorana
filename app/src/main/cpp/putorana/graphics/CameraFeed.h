@@ -19,12 +19,12 @@ class Device;
 /**
  * The ARCore camera image, as two Vulkan textures.
  *
- * Deliberately NOT a pass. It opens no rendering scope and draws nothing — it
+ * Deliberately NOT a pass. It opens no rendering scope and draws nothing: it
  * only turns the bytes putorana::ar::Subsystem hands out into something
  * samplable, and the final pass composites it. An earlier version of this did
  * own a pass, drawing the feed into the mesh pass's colour target before the
  * geometry; the attachment then had to be stored and loaded back between the two
- * scopes, which on a tiler costs a full screen read plus a full screen write —
+ * scopes, which on a tiler costs a full screen read plus a full screen write,
  * around 16MB a frame at 1080p. Compositing in the pass that was already going
  * to read that attachment costs nothing extra.
  *
@@ -40,7 +40,7 @@ class Device;
  * RenderDoc is worth more right now than the copy costs.
  *
  * The copy is smaller than it sounds. ARCore's CPU image is not the full sensor
- * — commonly 640x480, so about 460KB at 1.5 bytes per pixel — and no colour
+ * (commonly 640x480, so about 460KB at 1.5 bytes per pixel) and no colour
  * conversion happens on the CPU at all: the two planes go up as they are and the
  * fragment shader does the matrix.
  *
@@ -66,7 +66,7 @@ public:
      * Copies this frame's camera image into the two textures and leaves them in
      * SHADER_READ_ONLY_OPTIMAL.
      *
-     * MUST be called outside any rendering scope — it records buffer-to-image
+     * MUST be called outside any rendering scope: it records buffer-to-image
      * copies and image barriers, neither of which is legal between
      * vkCmdBeginRendering and vkCmdEndRendering.
      *
@@ -84,7 +84,7 @@ public:
      * */
     bool ready() const { return hasContent_; }
 
-    /** LINEAR — this is a genuine rescale, and it upsamples the chroma too. */
+    /** LINEAR: this is a genuine rescale, and it upsamples the chroma too. */
     VkSampler sampler() const { return sampler_; }
 
     /** Null until the first upload has built them. */
@@ -93,7 +93,7 @@ public:
 
     /**
      * Where the three corners of a fullscreen triangle land in the camera image,
-     * as u0,v0,u1,v1,u2,v2. Straight from ARCore — see ar::CameraFrame::uv.
+     * as u0,v0,u1,v1,u2,v2. Straight from ARCore; see ar::CameraFrame::uv.
      * */
     const float* uv() const { return uv_; }
 

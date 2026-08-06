@@ -114,7 +114,7 @@ bool OpenChiselWorld::CreateRenderPasses(const Swapchain& swapchain, std::string
         return false;
     }
 
-    // Not a pass — it draws nothing. It only owns the camera's two textures, for
+    // Not a pass: it draws nothing. It only owns the camera's two textures, for
     // the final pass to composite. Its failure is not the world's: no background
     // still leaves the reconstruction drawn on the clear colour, which is worth
     // having. So the error is logged and swallowed here rather than returned.
@@ -134,7 +134,7 @@ bool OpenChiselWorld::CreateWorld(std::string& error) {
     //
     // It was scaffolding and it did its job twice: first as the thing that
     // proved geometry was arriving with the right winding, normals and depth
-    // order, then as the marker that proved the unprojection maths — the frozen
+    // order, then as the marker that proved the unprojection maths: the frozen
     // marker staying nailed to a wall while the phone moved is what ruled out
     // both axis flips, the quaternion order and the choice of pose. The
     // reconstruction now tests all of that continuously and far harder, so a
@@ -167,7 +167,7 @@ bool OpenChiselWorld::CreateWorld(std::string& error) {
         // first appears and fewer of them every second after.
         material->SetColorMix(kChunkColorMix);
         // What encoding the mesh pass's attachment wants. CreateRenderPasses has
-        // already run, so the format is settled by now — and it has to come from
+        // already run, so the format is settled by now, and it has to come from
         // the pass rather than be assumed, because the swapchain's _SRGB
         // preference has _UNORM fallbacks behind it.
         material->SetSrgbTarget(IsSrgbFormat(meshPass->colorFormat()));
@@ -196,7 +196,7 @@ bool OpenChiselWorld::CreateWorld(std::string& error) {
                             "OpenChiselWorld ready: AR camera, reconstruction on");
     } else {
         // No ARCore means no depth, so nothing will ever be reconstructed and
-        // this scene stays empty — the camera feed is gone too, so the screen is
+        // this scene stays empty: the camera feed is gone too, so the screen is
         // the clear colour and nothing else. That is the honest picture of what
         // this world can do on such a device; the hello world is the one with
         // something to look at there.
@@ -204,7 +204,7 @@ bool OpenChiselWorld::CreateWorld(std::string& error) {
         eye->position = glm::vec3(2.0f, 3.0f, 5.0f);
         // LookAt reads the node's world matrix, and it is fresh here because
         // ComputeWorldMatrix walks the parent chain rather than trusting the
-        // cache — which has not been filled yet, since no frame has run.
+        // cache, which has not been filled yet, since no frame has run.
         eye->LookAt(glm::vec3(0.0f, 0.0f, 0.0f));
         __android_log_print(ANDROID_LOG_WARN, kLogTag,
                             "OpenChiselWorld ready: no ARCore, so nothing to reconstruct and "
@@ -237,7 +237,7 @@ void OpenChiselWorld::Update(float deltaSeconds) {
 
     // Last, and it must be: the base closes every world matrix, so anything
     // moved after this call would land a frame late. That is also why the
-    // reconstruction runs above rather than in Render — it creates nodes.
+    // reconstruction runs above rather than in Render: it creates nodes.
     World::Update(deltaSeconds);
 }
 
@@ -405,7 +405,7 @@ void OpenChiselWorld::UploadDirtyChunks(uint32_t frameIndex) {
         // the chunk has, and the rest of the buffer is whatever the last chunk
         // left there.
         //
-        // One region per call — see ChunkNode::uploadsRemaining.
+        // One region per call; see ChunkNode::uploadsRemaining.
         entry.mesh->Update(frameIndex, vertexScratch.data(), entry.vertexCount,
                            indexScratch.data(), entry.indexCount);
         --entry.uploadsRemaining;
@@ -424,7 +424,7 @@ void OpenChiselWorld::Render(const FrameContext& frame) {
     // until the slot being reused has retired on the GPU. Writing a mesh region
     // before that returns is a write into memory a draw from two frames ago may
     // still be reading. By the time Render is called the slot is ours, and no
-    // pass below has recorded a draw against it yet — which is the only window
+    // pass below has recorded a draw against it yet, which is the only window
     // where both are true.
     //
     // No GpuScope: this is CPU work into mapped memory and records no commands,
@@ -433,12 +433,12 @@ void OpenChiselWorld::Render(const FrameContext& frame) {
 
     // The camera image goes up first, and outside any rendering scope, because
     // buffer-to-image copies and image barriers are both illegal inside one.
-    // It opens no scope of its own — the final pass is what draws it.
+    // It opens no scope of its own: the final pass is what draws it.
     if (cameraFeed != nullptr) {
         if (const ar::Subsystem* subsystem = ar::subsystem_holder::Get()) {
             // The guard holds the subsystem's lock across the upload. Without it,
             // the activity pausing mid-frame releases the ArImage being copied
-            // out of — see AcquireFrame.
+            // out of; see AcquireFrame.
             const ar::Subsystem::FrameGuard guard = subsystem->AcquireFrame();
             GpuScope scope(frame, "camera upload");
             cameraFeed->Upload(frame, guard.get());
@@ -454,7 +454,7 @@ void OpenChiselWorld::Render(const FrameContext& frame) {
 
     const Image* color = meshPass->colorTarget();
     if (color == nullptr) {
-        // The mesh pass gave up on its targets — a window with no area, most
+        // The mesh pass gave up on its targets: a window with no area, most
         // likely. Nothing to composite.
         return;
     }

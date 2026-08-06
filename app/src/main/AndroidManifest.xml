@@ -11,27 +11,27 @@
         android:version="0x00403000"
         android:required="true" />
 
-    <!-- ARCore não abre a câmara sozinho: a permissão é da app, e tem de ser
-         pedida em runtime antes de ArSession_resume. -->
+    <!-- ARCore does not open the camera on its own: the permission belongs to the
+         app, and has to be requested at runtime before ArSession_resume. -->
     <uses-permission android:name="android.permission.CAMERA" />
 
-    <!-- O tracking do ARCore é visual-inercial: precisa da IMU a 200Hz, e pede-a
-         com um report delay de 5ms. Desde a API 31 que amostrar sensores de
-         movimento a esse ritmo exige esta permissão, e sem ela o registo do
-         sensor falha — o que se manifesta como ArSession_resume a devolver
-         AR_ERROR_FATAL com "Failed to register sensor to queue 0" no logcat, e
-         não como um erro de permissão. Nada na câmara está errado nesse caso.
+    <!-- ARCore's tracking is visual-inertial: it needs the IMU at 200Hz, and asks
+         for it with a 5ms report delay. Since API 31, sampling motion sensors at
+         that rate requires this permission, and without it the sensor
+         registration fails. That shows up as ArSession_resume returning
+         AR_ERROR_FATAL with "Failed to register sensor to queue 0" in logcat, and
+         not as a permission error. Nothing is wrong with the camera in that case.
 
-         Normal protection level: é concedida na instalação, não se pede em
-         runtime. Os samples do SDK não a declaram porque não têm targetSdk 31+. -->
+         Normal protection level: granted at install time, never requested at
+         runtime. The SDK samples do not declare it because they are not on 31+. -->
     <uses-permission android:name="android.permission.HIGH_SAMPLING_RATE_SENSORS" />
 
-    <!-- "AR Required", e não opcional: não há modo de funcionamento sem
-         tracking, tal como não há fallback sem Vulkan 1.3. Consequências, ambas
-         desejadas aqui: a Play Store esconde a app de dispositivos sem suporte
-         ARCore, e instala o ARCore junto com a app. Uma app AR Optional teria de
-         declarar required="false" nos dois sítios e verificar
-         ArCoreApk_checkAvailability antes de tocar na sessão. -->
+    <!-- "AR Required", not optional: there is no mode of operation without
+         tracking, the same way there is no fallback without Vulkan 1.3. Two
+         consequences, both wanted here: the Play Store hides the app from devices
+         with no ARCore support, and it installs ARCore alongside the app. An AR
+         Optional app would have to declare required="false" in both places and
+         check ArCoreApk_checkAvailability before touching the session. -->
     <uses-feature
         android:name="android.hardware.camera.ar"
         android:required="true" />
@@ -46,25 +46,25 @@
         android:supportsRtl="true"
         android:theme="@style/Theme.ARReconstructor">
 
-        <!-- Par do uses-feature acima: é isto que o Play lê para decidir
-             instalar o ARCore com a app. O min_apk_version correspondente vem
-             por merge do manifesto do próprio AAR. -->
+        <!-- The partner of the uses-feature above: this is what Play reads to
+             decide to install ARCore with the app. The matching min_apk_version
+             arrives by manifest merge from the AAR itself. -->
         <meta-data
             android:name="com.google.ar.core"
             android:value="required" />
 
-        <!-- Fixa em portrait. Uma rotação aqui não é um relayout: destrói a
-             Activity, a Surface, o VkDevice, a swapchain e o mundo inteiro, e
-             reconstrói tudo — a sessão de AR é a única coisa que sobrevive, por
-             viver ao nível da aplicação. Não vale pagar isso numa app cuja
-             interface é a câmara.
+        <!-- Pinned to portrait. A rotation here is not a relayout: it destroys
+             the Activity, the Surface, the VkDevice, the swapchain and the whole
+             world, and rebuilds all of it. The AR session is the only thing that
+             survives, because it lives at application scope. Not worth paying in
+             an app whose interface is the camera.
 
-             Isto NÃO torna o tratamento de rotação do renderer redundante, e por
-             isso ele fica: o preTransform da swapchain pode não ser identidade
-             mesmo com a orientação fixa, e desde a API 36 o Android ignora esta
-             restrição em ecrãs grandes — num tablet a app roda na mesma. O
-             ArCamera e o CameraFeed continuam a compor SurfaceRotation, que é o
-             que a mantém correta nesse caso. -->
+             This does NOT make the renderer's rotation handling redundant, which
+             is why that stays: the swapchain's preTransform can be something
+             other than identity even with the orientation pinned, and since API
+             36 Android ignores this restriction on large screens, so on a tablet
+             the app rotates anyway. ArCamera and CameraFeed still compose
+             SurfaceRotation, which is what keeps it correct in that case. -->
         <activity
             android:name=".MainActivity"
             android:screenOrientation="portrait"

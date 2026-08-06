@@ -16,7 +16,7 @@ import android.view.SurfaceView
  * hierarchy's own rendering, which costs a copy per frame and adds latency.
  *
  * The view holds nothing but the render thread, and only for as long as there is
- * a surface to feed it. Everything that matters — surface, device, swapchain —
+ * a surface to feed it. Everything that matters (surface, device, swapchain)
  * has a lifetime tied to the surface, not to the view or the Activity, so
  * putting any of it here would be tying it to the wrong thing.
  */
@@ -32,8 +32,8 @@ class VulkanSurfaceView @JvmOverloads constructor(
      * A world picked while there was no render thread to tell, replayed when one
      * appears. Null the rest of the time.
      *
-     * Nearly unreachable — the menu sits on top of this view, and there is no
-     * surface only while the activity is on its way out — but a request that is
+     * Nearly unreachable (the menu sits on top of this view, and there is no
+     * surface only while the activity is on its way out) but a request that is
      * silently dropped looks exactly like a switch that does not work, and this
      * is cheaper than ruling that out later.
      *
@@ -56,7 +56,7 @@ class VulkanSurfaceView @JvmOverloads constructor(
     }
 
     /**
-     * The surface exists. Note that its size is not trustworthy yet — Android
+     * The surface exists. Note that its size is not trustworthy yet: Android
      * always follows this with [surfaceChanged], which is where the real
      * dimensions show up and where the frame loop starts.
      */
@@ -88,8 +88,8 @@ class VulkanSurfaceView @JvmOverloads constructor(
     override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
         // ARCore first, and from THIS thread rather than the render thread. It
         // needs the display rotation, which is a property of the view hierarchy,
-        // and it is the one piece of per-surface information the session — whose
-        // life is the activity's, not the surface's — still has to be told.
+        // and it is the one piece of per-surface information the session, whose
+        // life is the activity's, not the surface's, still has to be told.
         //
         // Every rotation comes through here, which is what keeps the camera
         // background upright without anything having to be rebuilt: only the UVs
@@ -106,7 +106,7 @@ class VulkanSurfaceView @JvmOverloads constructor(
     /**
      * Blocking, by way of [RenderThread.shutdown]. Returning from here tells
      * Android that nothing is using the surface any more, so the render thread
-     * has to be genuinely finished with it — not merely told to stop.
+     * has to be genuinely finished with it, not merely told to stop.
      */
     override fun surfaceDestroyed(holder: SurfaceHolder) {
         renderThread?.shutdown()

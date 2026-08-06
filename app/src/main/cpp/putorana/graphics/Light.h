@@ -10,7 +10,7 @@ namespace putorana::graphics {
  * Which kind of light this is, as a plain field rather than a virtual call.
  *
  * The thing that consumes lights buckets them by type and writes three
- * differently shaped arrays to the GPU — one switch at collection time, then a
+ * differently shaped arrays to the GPU: one switch at collection time, then a
  * static_cast. That is a data-oriented job, so paying for virtual dispatch to
  * ask "what are you" would be backwards.
  * */
@@ -22,7 +22,7 @@ enum class LightType {
 
 /**
  * A light source, as scene data. Hangs off a Node the same way a Renderable
- * does, and knows nothing about Vulkan — no buffer, no descriptor, not even an
+ * does, and knows nothing about Vulkan: no buffer, no descriptor, not even an
  * include. Whatever gathers lights each frame reads these fields and packs them.
  *
  * ## What is deliberately NOT here: position and direction
@@ -38,7 +38,7 @@ enum class LightType {
  * ## Units
  *
  * Colour is linear RGB, not sRGB. It gets multiplied by intensity and summed
- * with other lights, and both of those are only meaningful in linear space —
+ * with other lights, and both of those are only meaningful in linear space:
  * the conversion to sRGB happens once, at the very end of the frame.
  * */
 class Light {
@@ -63,7 +63,7 @@ public:
      * May this light be dropped when it falls outside the camera frustum?
      *
      * The default is yes, which is right for a torch or a muzzle flash. A light
-     * meant to illuminate the whole scene — a sun — has to set this false, or it
+     * meant to illuminate the whole scene, a sun, has to set this false, or it
      * will blink out the moment it leaves the frame. Directional lights have no
      * position to test in the first place, so for them the flag never comes up.
      *
@@ -77,8 +77,8 @@ protected:
 
     // Protected rather than public, which is the standard recipe for a
     // polymorphic base: subclasses stay freely copyable, but assigning a
-    // SpotLight to a Light& — which would slice the cone angles off and leave a
-    // half-copied object behind — will not compile.
+    // SpotLight to a Light&, which would slice the cone angles off and leave a
+    // half-copied object behind, will not compile.
     Light(const Light&) = default;
     Light& operator=(const Light&) = default;
 
@@ -95,7 +95,7 @@ public:
 /**
  * A cone from the node's world position, pointing down the node's -Z.
  *
- * Angles are in RADIANS, measured from the cone's centre axis — not degrees,
+ * Angles are in RADIANS, measured from the cone's centre axis, not degrees,
  * unlike Camera::fovY. The inconsistency is deliberate and comes from where the
  * numbers originate: these are read verbatim out of a glTF's KHR_lights_punctual,
  * which specifies radians, while a field of view is a number a human types.
@@ -113,7 +113,7 @@ public:
 };
 
 /**
- * Parallel rays from infinitely far away — a sun. Only the node's -Z matters;
+ * Parallel rays from infinitely far away, a sun. Only the node's -Z matters;
  * its position is ignored entirely, so moving a directional light does nothing.
  * */
 class DirectionalLight : public Light {

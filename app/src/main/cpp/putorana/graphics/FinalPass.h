@@ -15,13 +15,13 @@ class Device;
 
 /**
  * Puts what the mesh pass drew onto the image that gets presented, by drawing
- * one screen-covering triangle that samples it — and, when there is one, puts
+ * one screen-covering triangle that samples it, and, when there is one, puts
  * the camera feed underneath it in the same draw.
  *
  * ## Why this exists at all
  *
  * The mesh pass could draw straight into the swapchain image and save a full
- * screen write plus a full screen read — which on a phone is real bandwidth, and
+ * screen write plus a full screen read, which on a phone is real bandwidth, and
  * this pass is not free. It is here because everything that has to happen to a
  * finished image happens in it: compositing the virtual world onto the real one,
  * tone mapping the day the mesh pass draws into a float target and light is
@@ -32,8 +32,8 @@ class Device;
  * ## Why the camera feed composites HERE
  *
  * Because this pass was already going to read the mesh pass's attachment, so the
- * background costs one extra texture fetch and nothing else. The alternative —
- * a camera pass drawing into that attachment before the mesh pass — forces the
+ * background costs one extra texture fetch and nothing else. The alternative,
+ * a camera pass drawing into that attachment before the mesh pass, forces the
  * attachment to be stored and loaded back between the two scopes: a full screen
  * read plus an extra full screen write, around 16MB a frame at 1080p, for a
  * result that draw order gives away.
@@ -46,7 +46,7 @@ class Device;
  * ## Its own set 0
  *
  * Nothing here shares the mesh pass's descriptor layouts. There is no camera, no
- * per-object array and no material — three combined image samplers, and it is
+ * per-object array and no material: three combined image samplers, and it is
  * set 0 because it is the only set there is. A pass gets to define its own
  * numbering; the three-set contract in Material.h is about shaders that draw
  * geometry.
@@ -66,8 +66,8 @@ public:
      * Draws `source` over the whole swapchain image, with `feed` showing through
      * wherever `source` is transparent.
      *
-     * `source` must already be in SHADER_READ_ONLY_OPTIMAL — MeshPass leaves it
-     * that way on its own barrier — and the swapchain image must already be a
+     * `source` must already be in SHADER_READ_ONLY_OPTIMAL (MeshPass leaves it
+     * that way on its own barrier) and the swapchain image must already be a
      * colour attachment, which the frame loop arranged before calling the world.
      *
      * `feed` may be null, or may be non-null but have nothing uploaded yet. Both
@@ -93,7 +93,7 @@ private:
      * Gets the 1x1 stand-in into a samplable layout, once.
      *
      * It exists because a descriptor must name a valid view even on the frames
-     * where nothing samples it in earnest — before the first camera image, or
+     * where nothing samples it in earnest: before the first camera image, or
      * forever on a device with no ARCore. Binding it is cheaper than a second
      * pipeline, and cheaper than a branch in the shader that would run per pixel
      * to avoid a fetch that is already multiplied by zero.

@@ -92,7 +92,7 @@ MeshPass::~MeshPass() {
 }
 
 bool MeshPass::CreateLayouts(std::string& error) {
-    // Set 0: the frame uniform. Visible to both stages — the vertex shader needs
+    // Set 0: the frame uniform. Visible to both stages: the vertex shader needs
     // view and proj, the fragment shader needs the camera position for specular.
     VkDescriptorSetLayoutBinding frameBinding{};
     frameBinding.binding = 0;
@@ -110,7 +110,7 @@ bool MeshPass::CreateLayouts(std::string& error) {
     }
 
     // Set 1: the object array. A STORAGE buffer and not a uniform one because it
-    // is indexed at runtime by gl_InstanceIndex and is unbounded — a uniform
+    // is indexed at runtime by gl_InstanceIndex and is unbounded; a uniform
     // buffer caps at 16KiB on plenty of Android hardware, which is 128 objects.
     VkDescriptorSetLayoutBinding objectBinding{};
     objectBinding.binding = 0;
@@ -182,7 +182,7 @@ bool MeshPass::EnsureObjectCapacity(uint32_t objectCount) {
 
     // Rewriting a descriptor set the GPU might be reading is undefined, and
     // these sets are bound by frames that may still be in flight. Growing is
-    // rare — a doubling — so the blunt wait is the right trade against tracking
+    // rare (a doubling) so the blunt wait is the right trade against tracking
     // which sets are live.
     if (objectCapacity_ != 0) {
         vkDeviceWaitIdle(handle_);
@@ -251,7 +251,7 @@ bool MeshPass::EnsureTargets(VkExtent2D extent) {
     depthDesc.format = depthFormat_;
     // No SAMPLED: nothing reads this depth back yet. Adding TRANSIENT_ATTACHMENT
     // and lazily allocated memory would let a tiler keep it in tile memory and
-    // never write it to RAM at all — worth doing the day it is certain nothing
+    // never write it to RAM at all, worth doing the day it is certain nothing
     // samples it.
     depthDesc.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
     depthDesc.aspect = VK_IMAGE_ASPECT_DEPTH_BIT;
@@ -304,8 +304,8 @@ void MeshPass::Collect(Node& node, std::vector<DrawItem>& items, const Node*& ca
     if (node.renderable.has_value() && node.renderable->DrawnIn(RenderPassBit::Main)) {
         const Renderable& renderable = *node.renderable;
         // Frustum culling belongs right here, before an object costs a pipeline
-        // lookup and a slot in the object buffer. Not implemented yet — there is
-        // no frustum extractor — and this is the one line it changes.
+        // lookup and a slot in the object buffer. Not implemented yet (there is
+        // no frustum extractor) and this is the one line it changes.
         if (renderable.material != nullptr) {
             const Material& material = *renderable.material;
             if (const MaterialPipeline* pipeline =
@@ -354,14 +354,14 @@ void MeshPass::Render(const FrameContext& frame, Node& root, bool transparentCle
 
     // ---- 2. sort ----
     // By pipeline, then material, then mesh, which is what makes a run of
-    // objects sharing all three CONTIGUOUS — and a contiguous run is what
+    // objects sharing all three CONTIGUOUS, and a contiguous run is what
     // becomes one instanced draw.
     //
     // Reordering is safe only because this pass is entirely opaque and the depth
     // test settles visibility. A pass with blending would need the order to be
     // back-to-front, and this sort would be a bug rather than a speed-up.
     //
-    // Ordered by pointer, which the WebGPU version cannot do — it assigns
+    // Ordered by pointer, which the WebGPU version cannot do: it assigns
     // first-appearance ids because JavaScript has no ordering on object
     // references. std::less gives a total order over unrelated pointers, so the
     // ids are unnecessary here.
@@ -404,7 +404,7 @@ void MeshPass::Render(const FrameContext& frame, Node& root, bool transparentCle
     // ---- 4. draw ----
     //
     // UNDEFINED discards whatever the target held, which is right because the
-    // loadOp clears it anyway — and on a tiler, preserving means reading the
+    // loadOp clears it anyway, and on a tiler, preserving means reading the
     // whole image back into tile memory first.
     //
     // The source scope still matters even with UNDEFINED: the previous frame's
@@ -422,7 +422,7 @@ void MeshPass::Render(const FrameContext& frame, Node& root, bool transparentCle
     // DEPTH_ATTACHMENT_OPTIMAL, even though this image has no stencil aspect.
     // The separate layouts came in with VK_KHR_separate_depth_stencil_layouts
     // and using one requires the separateDepthStencilLayouts feature to be
-    // enabled — which PhysicalDevice does not ask for, because the rule there is
+    // enabled, which PhysicalDevice does not ask for, because the rule there is
     // that nothing goes in the required list unless a conforming 1.3 device
     // cannot refuse it. The combined layout needs no feature and behaves
     // identically for a format that has only depth.
@@ -441,7 +441,7 @@ void MeshPass::Render(const FrameContext& frame, Node& root, bool transparentCle
     // Alpha is the whole message to the final pass: 0 means "nothing was drawn
     // here, show what is behind", and behind is the camera. With no camera there
     // is nothing behind, so the clear is opaque and the final pass's mix keeps
-    // this colour throughout — which is how the cornflower field survives on a
+    // this colour throughout, which is how the cornflower field survives on a
     // device with no ARCore, without a second code path anywhere.
     colorAttachment.clearValue.color =
             transparentClear ? VkClearColorValue{{0.0f, 0.0f, 0.0f, 0.0f}}
@@ -468,7 +468,7 @@ void MeshPass::Render(const FrameContext& frame, Node& root, bool transparentCle
 
     vkCmdBeginRendering(frame.commandBuffer, &rendering);
 
-    // Dynamic, and required to be so by every material — see Material.h. A baked
+    // Dynamic, and required to be so by every material; see Material.h. A baked
     // viewport would be wrong after the first rotation, with no diagnostic.
     VkViewport viewport{};
     viewport.width = static_cast<float>(extent.width);
@@ -499,8 +499,8 @@ void MeshPass::Render(const FrameContext& frame, Node& root, bool transparentCle
             // Binding them once would work only if every material's pipeline
             // layout were compatible for those sets, which is true today and is
             // the kind of invariant that breaks silently the day a material adds
-            // a push constant. One extra call per DISTINCT PIPELINE — a handful
-            // per frame after the sort — buys not having to rely on it.
+            // a push constant. One extra call per DISTINCT PIPELINE (a handful
+            // per frame after the sort) buys not having to rely on it.
             const VkDescriptorSet sets[] = {frameSets_[frame.frameIndex],
                                             objectSets_[frame.frameIndex]};
             vkCmdBindDescriptorSets(frame.commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,

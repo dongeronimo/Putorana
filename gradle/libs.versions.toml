@@ -8,8 +8,8 @@ espressoCore = "3.7.0"
 appcompat = "1.7.1"
 material = "1.14.0"
 constraintlayout = "2.2.1"
-# Precisa de ser igual à versão do cabeçalho vendorizado em
-# app/src/main/cpp/third_party/arcore/ — as duas metades do mesmo release.
+# Must match the version of the vendored header in
+# app/src/main/cpp/third_party/arcore/. They are two halves of one release.
 arcore = "1.54.0"
 
 [libraries]

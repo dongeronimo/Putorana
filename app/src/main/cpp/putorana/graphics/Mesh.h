@@ -16,9 +16,9 @@ namespace putorana::graphics {
 /**
  * Two independent axes, and keeping them independent is the whole design.
  *
- *   VertexFormat  — what a vertex contains. Changes the stride and the vertex
+ *   VertexFormat:   what a vertex contains. Changes the stride and the vertex
  *                   input state a pipeline is built with. Nothing else.
- *   MeshStorage   — whether the geometry can be rewritten after setup. Changes
+ *   MeshStorage:    whether the geometry can be rewritten after setup. Changes
  *                   how the memory is laid out. Nothing else.
  *
  * Every combination works, and neither axis knows the other exists.
@@ -72,7 +72,7 @@ enum class MeshStorage {
      * */
     Immutable,
     /**
-     * Rewritable per frame. Costs kFramesInFlight copies of the geometry — see
+     * Rewritable per frame. Costs kFramesInFlight copies of the geometry; see
      * the note on N-buffering in the Mesh comment.
      * */
     Mutable,
@@ -91,7 +91,7 @@ struct StaticVertex {
 static_assert(sizeof(StaticVertex) == 32, "StaticVertex must stay tightly packed at 32 bytes");
 
 /**
- * 28 bytes. The generated-geometry format — see VertexFormat::Reconstructed.
+ * 28 bytes. The generated-geometry format; see VertexFormat::Reconstructed.
  *
  * Position and normal sit at the same offsets as StaticVertex's, deliberately.
  * Anything that only wants those two (bounds, culling, a depth-only pass) reads
@@ -114,7 +114,7 @@ static_assert(sizeof(StaticVertex) == 32, "StaticVertex must stay tightly packed
  * whether to trust the colour or fall back to the material's.
  *
  * Mirrored by recon::Vertex, which is what actually fills it. The two are held
- * together by static_asserts in OpenChiselWorld.cpp — that separation, and why
+ * together by static_asserts in OpenChiselWorld.cpp. That separation, and why
  * it cannot be collapsed, is explained on recon::Vertex.
  * */
 struct ReconstructedVertex {
@@ -125,19 +125,19 @@ struct ReconstructedVertex {
 static_assert(sizeof(ReconstructedVertex) == 28,
               "ReconstructedVertex must stay tightly packed at 28 bytes");
 static_assert(alignof(ReconstructedVertex) == 4,
-              "ReconstructedVertex must not pick up wider alignment — the stride and every "
+              "ReconstructedVertex must not pick up wider alignment: the stride and every "
               "region offset in this file assume 4");
 
 /**
  * 52 bytes: the static layout, a quad of joint indices and four float weights.
  *
- * Weights are stored exactly as the exporter produced them — R32G32B32A32_SFLOAT
+ * Weights are stored exactly as the exporter produced them, R32G32B32A32_SFLOAT
  * and nothing else. They are normalised floats in the asset and they stay
  * normalised floats here, so what the skinning shader multiplies by is bit for
  * bit what the artist's rig produced.
  *
  * Joint indices are R8G8B8A8_UINT, which is what glTF itself uses for JOINTS_0
- * (unsigned byte or unsigned short) and caps a mesh at 256 joints — past any
+ * (unsigned byte or unsigned short) and caps a mesh at 256 joints, past any
  * real character rig, and a mesh that needed more would be split for other
  * reasons anyway. The format carries mandatory VERTEX_BUFFER support in the
  * Vulkan spec, so there is nothing to query at runtime, and it arrives in the
@@ -155,7 +155,7 @@ struct SkinnedVertex {
 };
 static_assert(sizeof(SkinnedVertex) == 52, "SkinnedVertex must stay tightly packed at 52 bytes");
 static_assert(alignof(SkinnedVertex) == 4,
-              "SkinnedVertex must not pick up 16-byte alignment from glm::vec4 — the stride and "
+              "SkinnedVertex must not pick up 16-byte alignment from glm::vec4: the stride and "
               "every region offset in this file assume 4");
 
 /** Bytes per vertex for a format. */
@@ -163,7 +163,7 @@ uint32_t VertexStrideFor(VertexFormat format);
 
 /**
  * The format's name, for diagnostics. Exists so that a log line naming a format
- * cannot drift out of date when a format is added — which it silently did the
+ * cannot drift out of date when a format is added, which it silently did the
  * first time, calling everything that was not skinned "static".
  * */
 const char* VertexFormatName(VertexFormat format);
@@ -183,7 +183,7 @@ struct Aabb {
  *
  * It owns its arrays on purpose. VkPipelineVertexInputStateCreateInfo is nothing
  * but two pointers and two counts, so building it from temporaries is the single
- * most common way to hand vkCreateGraphicsPipelines dangling memory — the bug
+ * most common way to hand vkCreateGraphicsPipelines dangling memory: the bug
  * shows up as garbage geometry on one driver and works fine on another. Keep the
  * VertexInput alive across the vkCreateGraphicsPipelines call and it cannot
  * happen.
@@ -208,8 +208,8 @@ struct VertexInput {
  * UV to conflict with. The point is that a location number means ONE thing
  * everywhere: location 2 is a UV in every shader in this project, so a colour
  * can never be read as one. Neither choice is safer against a mismatched
- * pipeline — an unbound location 2 and a location 2 bound to the wrong type are
- * both undefined values with no diagnostic — but only one of them keeps the
+ * pipeline (an unbound location 2 and a location 2 bound to the wrong type are
+ * both undefined values with no diagnostic) but only one of them keeps the
  * table above readable as a fact rather than as a per-format lookup.
  *
  * The attribute ARRAY index is not the location. Reconstructed fills slots 0..2
@@ -225,7 +225,7 @@ struct MeshDesc {
     MeshStorage storage = MeshStorage::Immutable;
 
     /**
-     * Interleaved vertices in the layout `format` names — StaticVertex or
+     * Interleaved vertices in the layout `format` names: StaticVertex or
      * SkinnedVertex. Required for Immutable; may be null for Mutable, which then
      * starts empty and waits for the first Update.
      * */
@@ -233,8 +233,8 @@ struct MeshDesc {
     uint32_t vertexCount = 0;
 
     /**
-     * Always uint32 on this side of the fence, whatever the mesh ends up storing
-     * — Mesh narrows to uint16 when it can. One index type for every caller
+     * Always uint32 on this side of the fence, whatever the mesh ends up storing;
+     * Mesh narrows to uint16 when it can. One index type for every caller
      * means loaders never have to think about it.
      * */
     const uint32_t* indices = nullptr;
@@ -252,7 +252,7 @@ struct MeshDesc {
 /**
  * Indexed geometry on the GPU: one vertex buffer, one index buffer, and the
  * counts to draw them with. Knows nothing about materials, pipelines or the
- * scene graph — a Mesh is a thing you bind, not a thing that draws itself.
+ * scene graph: a Mesh is a thing you bind, not a thing that draws itself.
  *
  * On mutability and why it costs memory rather than a staging buffer.
  *
@@ -261,8 +261,8 @@ struct MeshDesc {
  * What that does not solve is timing. kFramesInFlight frames are in flight at
  * once, so while frame N is being recorded on the CPU, the GPU is still reading
  * the buffers frame N-1 bound. Overwriting them is a data race with no
- * validation layer message and a symptom — geometry flickering between two
- * shapes — that looks like a bug in whatever generated the vertices.
+ * validation layer message and a symptom (geometry flickering between two
+ * shapes) that looks like a bug in whatever generated the vertices.
  *
  * The fix is one region per frame in flight, inside the same allocation, and the
  * frame index picking which one to write and bind. That is why Bind, Draw and
@@ -304,7 +304,7 @@ public:
      * that happen to share a pipeline, a material and this mesh, which is
      * knowledge that only the render pass doing the batching has. A Draw() here
      * would have to take both as arguments anyway, and it would hide this count
-     * — the very number the batching loop needs — inside itself, quietly
+     * (the very number the batching loop needs) inside itself, quietly
      * inviting one draw call per object.
      *
      * Zero means the region has not been written yet, which only a Mutable mesh

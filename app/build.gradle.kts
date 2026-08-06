@@ -20,17 +20,17 @@ android {
         externalNativeBuild {
             cmake {
                 cppFlags += "-std=c++17"
-                // O CMake vai buscar o mesmo AAR que o `implementation` abaixo,
-                // para extrair dele o libarcore_sdk_c.so contra o qual se linka
-                // (ver src/main/cpp/CMakeLists.txt). A versão vem daqui para que
-                // o catálogo continue a ser o único sítio que a decide — se as
-                // duas divergissem, linkava-se contra uma versão e empacotava-se
-                // outra.
+                // CMake fetches the same AAR the `implementation` below does, to
+                // pull libarcore_sdk_c.so out of it and link against that
+                // (see src/main/cpp/CMakeLists.txt). The version comes from here
+                // so the catalog stays the only place that decides it: if the two
+                // ever disagreed, the build would link against one version and
+                // package another.
                 arguments += "-DARCORE_VERSION=${libs.versions.arcore.get()}"
             }
         }
         ndk {
-            // Único alvo: device arm64 físico. AR não roda no emulador x86.
+            // The only target: a physical arm64 device. AR does not run on the x86 emulator.
             abiFilters += "arm64-v8a"
         }
     }
@@ -62,46 +62,46 @@ android {
     }
 }
 
-// Shaders são compilados em build time, nunca no app. O script lê
-// assets/shaders e escreve SPIR-V em src/main/assets/shaders, que é o que o
-// Gradle empacota.
+// Shaders are compiled at build time, never by the app. The script reads
+// assets/shaders and writes SPIR-V into src/main/assets/shaders, which is what
+// Gradle packages.
 //
-// Exec falha o build quando o processo sai com código != 0, que é o default e é
-// exatamente o que se quer: erro de compilação de GLSL tem que parar a build, e
-// não deixá-la empacotar o .spv bom da vez anterior — o sintoma disso seria um
-// shader que se comporta como a versão de antes do conserto.
+// Exec fails the build when the process exits non-zero, which is the default and
+// exactly what is wanted: a GLSL compile error has to stop the build rather than
+// let it package the good .spv from last time. The symptom of that would be a
+// shader behaving like the version from before the fix.
 val compileShaders = tasks.register<Exec>("compileShaders") {
     group = "build"
-    description = "Compila assets/shaders/*.vert|frag para SPIR-V em src/main/assets/shaders"
+    description = "Compiles assets/shaders/*.vert|frag to SPIR-V in src/main/assets/shaders"
 
     val script = rootProject.file("tools/compile_shaders.py")
     val sources = rootProject.file("assets/shaders")
     val output = file("src/main/assets/shaders")
 
     workingDir = rootProject.projectDir
-    // O launcher do Windows chama-se "python"; em Linux/macOS "python" pode não
-    // existir ou ser o 2.x.
+    // The Windows launcher is called "python"; on Linux and macOS "python" may
+    // not exist at all, or may be the 2.x one.
     val python = if (System.getProperty("os.name").startsWith("Windows")) "python" else "python3"
     commandLine(python, script.absolutePath)
 
-    // Up-to-date checking do Gradle, além do incremental do próprio script: sem
-    // isto a task roda em toda build, e o script vira ruído no log.
+    // Gradle's up-to-date checking, on top of the script's own incremental pass:
+    // without this the task runs on every build and the script becomes log noise.
     inputs.dir(sources).withPathSensitivity(PathSensitivity.RELATIVE)
     inputs.file(script)
     outputs.dir(output)
 }
 
-// preBuild é a primeira task do módulo, então isto garante que os .spv existem
-// antes de qualquer merge de assets.
+// preBuild is the module's first task, so this guarantees the .spv files exist
+// before any asset merge.
 tasks.named("preBuild") {
     dependsOn(compileShaders)
 }
 
 dependencies {
 
-    // Traz o classes.jar (ArCoreApk, para o fluxo de instalação/permissões), o
-    // merge do manifesto, e o empacotamento de jni/**/*.so no APK. O link
-    // nativo contra esse .so é tratado à parte, pelo CMake.
+    // Brings in classes.jar (ArCoreApk, for the install and permission flow), the
+    // manifest merge, and the packaging of jni/**/*.so into the APK. Linking
+    // natively against that .so is handled separately, by CMake.
     implementation(libs.arcore)
 
     implementation(libs.androidx.core.ktx)

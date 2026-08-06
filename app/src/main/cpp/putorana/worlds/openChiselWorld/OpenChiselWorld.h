@@ -28,7 +28,7 @@ namespace putorana::worlds::openChisel {
  *
  * This was the app's only world for a long time, and it was called HelloWorld
  * for as long: it began as one cube from a .glb, spinning, to exercise the whole
- * chain end to end — asset read, glTF parse, mesh upload, node graph, material,
+ * chain end to end: asset read, glTF parse, mesh upload, node graph, material,
  * pipeline cache, instanced draw, composite. The cube is gone; it did that job,
  * and then a second one as the marker that proved the unprojection maths. What
  * it proved the reconstruction now proves continuously and much harder. The name
@@ -36,7 +36,7 @@ namespace putorana::worlds::openChisel {
  *
  * Structure: ROOT, with one node carrying the camera, and one node per chunk of
  * reconstructed space arriving beneath it as the sensor sees more of the room.
- * The chunk nodes are a CACHE — see chunkNodes — because this world dies with
+ * The chunk nodes are a CACHE (see chunkNodes) because this world dies with
  * the Device on every trip to background AND on every switch to another world,
  * while the reconstruction does not.
  * */
@@ -56,7 +56,7 @@ private:
      * node tree into line with the result.
      *
      * Runs in Update rather than Render because it CREATES nodes, and
-     * World::Update closes every world matrix — a node added after that would
+     * World::Update closes every world matrix: a node added after that would
      * have no transform for a frame. The GPU uploads cannot happen here though:
      * Update runs before FrameRing::BeginFrame, so the region about to be
      * written may still be in flight. They happen in Render instead.
@@ -69,7 +69,7 @@ private:
     std::unique_ptr<graphics::MeshPass> meshPass;
     /**
      * The camera's textures, uploaded before the mesh pass and composited by the
-     * final pass. Not a pass itself — it opens no rendering scope.
+     * final pass. Not a pass itself: it opens no rendering scope.
      *
      * Null when it could not be built. The world then draws the chunks on the
      * cornflower clear, which is also what happens on a device with no ARCore
@@ -85,7 +85,7 @@ private:
      *
      * A CACHE, not the source of truth. This world belongs to a Device and a
      * Device dies every time the app is backgrounded, so every entry here is
-     * destroyed while recon::Reconstruction — at process scope — keeps the
+     * destroyed while recon::Reconstruction, at process scope, keeps the
      * voxels. Switching worlds destroys them too, and for the same reason: the
      * world is what the switch replaces. CreateWorld therefore asks the
      * reconstruction to re-report everything rather than assuming an empty scene
@@ -100,7 +100,7 @@ private:
          *
          * Not a bool, and this is the subtlety that would otherwise show up as
          * chunks flickering at half the frame rate. Mesh::Update writes ONE
-         * region — indexCounts_ is per region — so a chunk uploaded once has
+         * region (indexCounts_ is per region) so a chunk uploaded once has
          * data for one frame index and an empty region for the other. It has to
          * be written on kFramesInFlight consecutive frames, one region each,
          * because the region not in use this frame may still be being read by
@@ -142,7 +142,7 @@ private:
 
     /**
      * Vertex counts seen so far, bucketed, logged once. The mesh capacity below
-     * is a guess and this is what replaces it with a measurement — see the note
+     * is a guess and this is what replaces it with a measurement; see the note
      * on MeshStorage::Mutable in Mesh.h: capacity is fixed at creation, so
      * choosing it badly either truncates dense chunks or wastes most of the
      * largest allocation in the app.
@@ -179,7 +179,7 @@ private:
      *
      * arCamera is null when there is no AR session, which is also when the node
      * carries a PerspectiveCamera instead. It is kept as the derived type
-     * because feeding it a frame is not something the Camera interface does — a
+     * because feeding it a frame is not something the Camera interface does: a
      * projection is all a render pass needs, and SetFrame is upkeep the world
      * owns.
      * */

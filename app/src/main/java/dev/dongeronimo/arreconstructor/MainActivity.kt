@@ -58,7 +58,7 @@ class MainActivity : AppCompatActivity() {
                 // AR Required, so there is no degraded mode to fall back to. The
                 // renderer keeps drawing the cube on its clear colour, which is
                 // a good deal more informative than a black screen.
-                binding.sampleText.text = "camera permission denied — no AR"
+                binding.sampleText.text = "camera permission denied, no AR"
             }
         }
 
@@ -92,7 +92,7 @@ class MainActivity : AppCompatActivity() {
      *
      * The activity does not switch the world itself: it hands the choice to the
      * surface view, which owns the render thread the renderer has to be spoken
-     * to on. What comes back is nothing — the switch is fire and forget, and
+     * to on. What comes back is nothing: the switch is fire and forget, and
      * whether it worked is a question for logcat, not for the UI.
      *
      * The menu opens with the first entry ticked and the renderer starts on the
@@ -188,7 +188,7 @@ class MainActivity : AppCompatActivity() {
                 "gpu: no timings"
             } else {
                 // Right-aligned to a fixed width so the numbers do not dance
-                // horizontally as they change — the whole reason for a monospace
+                // horizontally as they change, the whole reason for a monospace
                 // font here.
                 timings.joinToString("\n") { "%-14s %6.2f ms".format(it.name, it.milliseconds) }
             }
@@ -234,7 +234,7 @@ class MainActivity : AppCompatActivity() {
      *
      * Two separate things happen here, and only doing one of them is the usual
      * mistake. setDecorFitsSystemWindows(false) stops the decor view from
-     * shrinking the content to fit the bars — without it the SurfaceView is
+     * shrinking the content to fit the bars. Without it the SurfaceView is
      * built for a shorter rectangle than the screen, and the swapchain follows.
      * Hiding the bars is what actually gets them off the pixels.
      */
@@ -245,7 +245,7 @@ class MainActivity : AppCompatActivity() {
             hide(WindowInsetsCompat.Type.systemBars())
             // Sticky immersive. An edge swipe brings the bars back as a
             // transient overlay that hides itself again, without resizing the
-            // window — which matters here, because a resize means a
+            // window, which matters here, because a resize means a
             // surfaceChanged and a swapchain rebuild every single time.
             systemBarsBehavior =
                 WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE

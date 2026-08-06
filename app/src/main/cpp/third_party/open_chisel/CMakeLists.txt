@@ -1,18 +1,18 @@
-# OpenChisel — vendored and modified. See README.md for provenance and for the
+# OpenChisel, vendored and modified. See README.md for provenance and for the
 # full list of local changes.
 #
 # Upstream ships a catkin package: its CMakeLists.txt hands off to catkin.cmake
 # the moment it detects a ROS environment, and declares dependencies on
 # roscpp/pcl_ros that do not exist here and are not needed. None of that reaches
-# the library itself — the 16 translation units below depend on nothing but
+# the library itself: the 16 translation units below depend on nothing but
 # Eigen and the standard library. So the build file is replaced wholesale rather
 # than patched.
 
 # ---- Eigen ----
 #
 # Header-only, and the only external thing OpenChisel needs. The surface it
-# actually uses is small — Vector2f/2i, Vector3f/3i, Vector4f, Matrix3f,
-# Matrix4f, Quaternionf, Affine3f, aligned_allocator — which is worth knowing
+# actually uses is small (Vector2f/2i, Vector3f/3i, Vector4f, Matrix3f,
+# Matrix4f, Quaternionf, Affine3f, aligned_allocator) which is worth knowing
 # because it is also the measure of how hard this would be to port onto the GLM
 # the rest of the project already uses, should the extra dependency ever start
 # to hurt.
@@ -56,7 +56,7 @@ target_compile_features(open_chisel PUBLIC cxx_std_17)
 # Eigen is an expression-template library. Unoptimised, every vector operation
 # stays a chain of real function calls instead of collapsing into a few
 # instructions, and eigen_assert bounds-checks every access. A Debug build of the
-# integrator is not "a bit slower" — it is slow enough that you can no longer
+# integrator is not "a bit slower": it is slow enough that you can no longer
 # tell a real performance problem from the build configuration.
 #
 # This is safe on Android in a way it is NOT on Windows. There, Debug and Release
@@ -90,7 +90,7 @@ target_link_libraries(open_chisel PRIVATE open_chisel_fast_flags)
 # is ever parsed by a translation unit built without these flags. See
 # putorana/recon/README.md, "The boundary, and why it is also a build setting".
 
-# Upstream is from 2014 and warns freely — unused parameters, signed/unsigned
+# Upstream is from 2014 and warns freely: unused parameters, signed/unsigned
 # comparisons, reordered initialisers. Silencing them here keeps the project's
 # own warnings readable; it is vendored code we are not going to police line by
 # line. Anything we *did* change is called out in README.md.

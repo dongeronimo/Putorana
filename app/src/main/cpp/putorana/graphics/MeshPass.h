@@ -26,7 +26,7 @@ class Node;
  * Set 0, binding 0. One per frame, written before anything is recorded.
  *
  * view and proj stay separate rather than pre-multiplied: shadowing and
- * lighting want them individually — the camera position, the view space — so no
+ * lighting want them individually (the camera position, the view space) so no
  * shader receives a viewProj it cannot take apart.
  *
  * Lights belong here too, and are not here yet. Adding them changes the layout
@@ -37,7 +37,7 @@ class Node;
 struct FrameData {
     glm::mat4 view{1.0f};
     glm::mat4 projection{1.0f};
-    /** World-space camera position. w is padding — std140 aligns a vec3 to 16 anyway. */
+    /** World-space camera position. w is padding; std140 aligns a vec3 to 16 anyway. */
     glm::vec4 cameraPosition{0.0f};
 };
 
@@ -46,7 +46,7 @@ struct FrameData {
  *
  * This is the whole instancing mechanism. Every visible object gets a slot, the
  * slots are filled in the SAME order the draws are issued, and a draw's
- * firstInstance is the index of its first slot — so gl_InstanceIndex, which
+ * firstInstance is the index of its first slot, so gl_InstanceIndex, which
  * Vulkan defines as firstInstance plus the instance counter, lands exactly on
  * the right one. A run of objects sharing pipeline, material and mesh therefore
  * collapses into one vkCmdDrawIndexed no matter where each of them is.
@@ -66,20 +66,20 @@ struct ObjectData {
  * Draws the opaque geometry of a scene into its own colour and depth targets.
  *
  * Not a VkRenderPass. Dynamic rendering means there is no such object anywhere
- * in this renderer — "render pass" here is the logical unit: a set of targets, a
+ * in this renderer; "render pass" here is the logical unit: a set of targets, a
  * set of descriptor layouts, and an algorithm for turning a tree of nodes into
  * as few draw calls as it can.
  *
  * ## The four steps of a frame
  *
- *   1. COLLECT — walk the tree, keep renderables whose passMask has this pass's
+ *   1. COLLECT: walk the tree, keep renderables whose passMask has this pass's
  *      bit, resolve each one's pipeline through the cache.
- *   2. SORT — by pipeline, then material, then mesh. Legal here because the pass
+ *   2. SORT: by pipeline, then material, then mesh. Legal here because the pass
  *      is entirely opaque and depth decides visibility; in a pass with blending
  *      the order would be correctness, not an optimisation.
- *   3. UPLOAD — write every object's matrices into set 1's buffer, in sorted
+ *   3. UPLOAD: write every object's matrices into set 1's buffer, in sorted
  *      order.
- *   4. DRAW — walk the sorted list in runs that share all three keys and emit
+ *   4. DRAW: walk the sorted list in runs that share all three keys and emit
  *      one instanced draw per run.
  *
  * ## Why the pipeline cache lives here
@@ -87,8 +87,8 @@ struct ObjectData {
  * Pipelines depend on the material type, the vertex format AND this pass's
  * attachment formats, so the pass is the only place that knows the whole key.
  * More importantly it has the right lifetime: it dies with the world, which dies
- * with the Device. See the long note in Material.h about why a static cache —
- * which is what the WebGPU original uses — is a latent crash on Android.
+ * with the Device. See the long note in Material.h about why a static cache,
+ * which is what the WebGPU original uses, is a latent crash on Android.
  * */
 class MeshPass {
 public:
@@ -110,7 +110,7 @@ public:
      *
      * `transparentClear` clears the colour target to zero alpha instead of an
      * opaque colour, which is what tells the final pass to show the camera feed
-     * wherever no geometry was drawn. Pass false — the default — when there is
+     * wherever no geometry was drawn. Pass false, the default, when there is
      * no feed to show, and the opaque clear then carries straight through the
      * final pass's mix unchanged.
      * */

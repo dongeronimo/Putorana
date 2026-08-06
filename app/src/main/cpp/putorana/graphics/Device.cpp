@@ -28,7 +28,7 @@ const char* SurfaceResultName(VkResult result) {
         case VK_ERROR_OUT_OF_DEVICE_MEMORY:
             return "VK_ERROR_OUT_OF_DEVICE_MEMORY";
         case VK_ERROR_NATIVE_WINDOW_IN_USE_KHR:
-            // The window already has a consumer attached — another VkSurfaceKHR
+            // The window already has a consumer attached: another VkSurfaceKHR
             // that was never destroyed, or an EGL/media surface on it.
             return "VK_ERROR_NATIVE_WINDOW_IN_USE_KHR";
         default:
@@ -85,7 +85,7 @@ void Device::OnSurfaceCreated(ANativeWindow* window) {
 
     // The surface is a thin wrapper: it hands the window to the driver as a
     // buffer consumer and answers questions about what can be presented to it.
-    // It does not allocate images and it does not care about size — that is the
+    // It does not allocate images and it does not care about size; that is the
     // swapchain's job. Note the window is *not* dup'd here: the surface borrows
     // the reference this object holds, which is why the release at teardown has
     // to come after vkDestroySurfaceKHR.
@@ -135,7 +135,7 @@ bool Device::CreateLogicalDevice() {
     queueInfo.pQueuePriorities = &queuePriority;
 
     // Every one of these is core in 1.2/1.3, so none of them appear as extension
-    // strings — they are turned on through the feature chain instead. Select()
+    // strings; they are turned on through the feature chain instead. Select()
     // already proved the adapter supports the whole set, so vkCreateDevice can
     // only fail here for reasons that have nothing to do with features.
     const RequiredFeatures features;
@@ -202,7 +202,7 @@ bool Device::CreateLogicalDevice() {
     }
 
     // Locked because the UI thread may be polling SnapshotTimings() right now,
-    // and device_ is already non-null by this point — so without this it can
+    // and device_ is already non-null by this point, so without this it can
     // observe a half-assigned pointer, or the null one it was before.
     {
         std::lock_guard<std::mutex> lock(profilerMutex_);
@@ -286,7 +286,7 @@ void Device::OnSurfaceDestroyed() {
     __android_log_print(ANDROID_LOG_INFO, kLogTag, "surfaceDestroyed: tearing down");
 
     // Order matters and it is strictly inside out. Nothing may still reference
-    // the window when this returns — the UI thread is blocked on it and Android
+    // the window when this returns: the UI thread is blocked on it and Android
     // invalidates the Surface the moment it does.
     if (device_ != VK_NULL_HANDLE) {
         // Blocks until every submission has retired. Destroying a device with
@@ -298,7 +298,7 @@ void Device::OnSurfaceDestroyed() {
         //
         // The world goes first of all. Its meshes are allocations from the
         // allocator three lines down, and its render targets are images from the
-        // same place — outliving either would be a use-after-free that
+        // same place: outliving either would be a use-after-free that
         // vmaDestroyAllocator would only report as a leak assert.
         world_.reset();
         swapchain_.reset();
@@ -346,7 +346,7 @@ namespace device_holder {
 
 Device& Get() {
     // Function-local static: constructed on first use, thread-safe since C++11,
-    // and there is exactly one for the life of the loaded library — same
+    // and there is exactly one for the life of the loaded library, the same
     // lifetime story as the instance, except this one is routinely empty.
     static Device device;
     return device;

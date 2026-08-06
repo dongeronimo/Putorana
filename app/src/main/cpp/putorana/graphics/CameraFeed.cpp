@@ -73,15 +73,15 @@ struct Vec2 {
  * A point in the SWAPCHAIN's normalised space, expressed in the VIEW's.
  *
  * The two are not the same space, and the difference is the swapchain's
- * preTransform. The swapchain is created with the surface's currentTransform —
- * see Swapchain.h — which is a promise that the app hands over content already
+ * preTransform. The swapchain is created with the surface's currentTransform
+ * (see Swapchain.h), which is a promise that the app hands over content already
  * rotated, so that the display controller can present it without a full screen
  * blit. Everything the app draws therefore lives in a space that is rotated
  * relative to what the user is looking at.
  *
  * The mesh pass keeps that promise in Camera::ProjectionMatrix, which multiplies
  * the projection by the matching clip-space rotation. A fullscreen triangle has
- * no projection matrix to hide it in, so it is paid here instead — and it has to
+ * no projection matrix to hide it in, so it is paid here instead, and it has to
  * be paid, because the texture coordinates it is being fed came from ARCore, and
  * ARCore answers in the VIEW's space.
  *
@@ -98,7 +98,7 @@ Vec2 SwapchainToView(VkSurfaceTransformFlagBitsKHR transform, Vec2 p) {
             return {1.0f - p.y, p.x};
         default:
             // Identity, and the mirrored transforms, which no Android compositor
-            // reports — the same judgement Camera::ProjectionMatrix makes.
+            // reports, the same judgement Camera::ProjectionMatrix makes.
             return p;
     }
 }
@@ -116,8 +116,8 @@ std::unique_ptr<CameraFeed> CameraFeed::Create(Device& device, std::string& erro
     VkSamplerCreateInfo samplerInfo{};
     samplerInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
     // LINEAR, unlike the final pass's own NEAREST sampler for the mesh target.
-    // That one is a 1:1 copy; this is a genuine rescale — a 640x480 camera image
-    // stretched over a 1080p screen — and for the chroma plane the filter is
+    // That one is a 1:1 copy; this is a genuine rescale (a 640x480 camera image
+    // stretched over a 1080p screen) and for the chroma plane the filter is
     // also what does the 4:2:0 upsampling.
     samplerInfo.magFilter = VK_FILTER_LINEAR;
     samplerInfo.minFilter = VK_FILTER_LINEAR;
